@@ -4,7 +4,7 @@ on high dimensional covariance matrix estimation.
 """
 
 import numpy as np
-from hfhd.hd import fsopt
+from hfhd import hd
 
 
 def prial(S_list, sigma_hat_list, sigma, loss_func=None):
@@ -52,7 +52,7 @@ def prial(S_list, sigma_hat_list, sigma, loss_func=None):
     mean_loss_sigma_hat = np.mean([loss_func(sigma_hat, sigma)
                                    for sigma_hat in sigma_hat_list], axis=0)
 
-    mean_loss_fsopt = np.mean([loss_func(fsopt(S, sigma), sigma)
+    mean_loss_fsopt = np.mean([loss_func(hd.fsopt(S, sigma), sigma)
                                for S in S_list], axis=0)
 
     denom = mean_loss_S - mean_loss_fsopt

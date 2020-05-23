@@ -114,6 +114,10 @@ setup(
     author_email=EMAIL,
     python_requires=REQUIRES_PYTHON,
     url=URL,
+    project_urls={
+        "Documentation": "https://hfhd.readthedocs.io/en/latest/",
+        "Issues": "https://github.com/jpwoeltjen/hfhd/issues",
+    },
     packages=find_packages(exclude=["tests", "*.tests", "*.tests.*", "tests.*"]),
     # If your package is a single module, use this instead of 'packages':
     # py_modules=['mypackage'],
