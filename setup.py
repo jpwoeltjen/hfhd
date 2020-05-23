@@ -38,7 +38,7 @@ EXTRAS = {
              'sphinxcontrib-serializinghtml==1.1.4',
              'sphinxcontrib-tikz==0.4.8',
              'sphinxcontrib-websupport==1.2.2',
-             'numpydoc==0.9.2]']
+             'numpydoc==0.9.2']
 }
 
 # The rest you shouldn't have to touch too much :)
