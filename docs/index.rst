@@ -1,8 +1,3 @@
-.. HFHD documentation master file, created by
-   sphinx-quickstart on Fri May  1 15:33:58 2020.
-   You can adapt this file completely to your liking, but it should at least
-   contain the root `toctree` directive.
-
 Welcome to hfhd's documentation!
 ================================
 
@@ -11,6 +6,13 @@ hfhd is an accelerated Python library for estimating (integrated) covariance mat
 When many assets are considered relative to the sample size, we say that the covariance matrix has high dimension. Then, sample eigenvalues are overdispersed relative to the population eigenvalues due to the curse of dimensionality. This overdispersion leads to an ill-conditioned covariance matrix estimate. The :mod:`hd` module provides tools to improve the condition of the matrix. 
 
 Loss functions in the :mod:`loss` module help to judge the performance of covariance estimators. The :mod:`sim` module provides a Universe class with which heavy tailed, noisily and irregularly observed, high dimensional asset returns with an underlying factor model can be simulated. 
+
+To install hfhd run
+
+.. code-block:: console
+
+   $ pip install hfhd
+
 
 The Price Process
 -----------------
