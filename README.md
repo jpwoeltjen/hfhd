@@ -16,4 +16,4 @@ To install hfhd, along with the tools to develop and run tests, run the followin
 $ pip install -e .[dev]
 ```
 
-[Read the documentation.] (https://hfhd.readthedocs.io/en/latest/)
+[Read the documentation.](https://hfhd.readthedocs.io/en/latest/)
