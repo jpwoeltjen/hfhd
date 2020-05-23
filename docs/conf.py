@@ -36,7 +36,7 @@ extensions = ['sphinx.ext.autodoc',
     'sphinx.ext.autosummary',
     # 'sphinxcontrib.napoleon'
     'numpydoc',
-    'sphinx.ext.doctest',
+    # 'sphinx.ext.doctest',
     'sphinx.ext.viewcode',
     'sphinx.ext.graphviz',
     'sphinx_math_dollar',
