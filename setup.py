@@ -28,7 +28,7 @@ REQUIRED = [
 # What packages are optional?
 EXTRAS = {
     'dev': ['pytest>=5.0'],
-    'docs': ['Sphinx==3.0.3'
+    'docs': ['Sphinx==3.0.3',
              'sphinx-automodapi==0.12',
              'sphinx-math-dollar==1.1.1',
              'sphinxcontrib-devhelp==1.0.2',
