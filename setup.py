@@ -14,7 +14,7 @@ from setuptools import find_packages, setup, Command
 # Package meta-data.
 NAME = 'hfhd'
 DESCRIPTION = 'hfhd is an accelerated Python library for estimating (integrated) covariance matrices with high frequency data in high dimensions.'
-URL = ''#'https://github.com/me/myproject'
+URL = 'https://github.com/jpwoeltjen/hfhd'
 EMAIL = 'j.p.woeltjen@gmail.com'
 AUTHOR = 'Jan Philipp Woeltjen'
 REQUIRES_PYTHON = '>=3.6.0'

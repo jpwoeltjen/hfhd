@@ -41,7 +41,7 @@ extensions = ['sphinx.ext.autodoc',
     'sphinx.ext.graphviz',
     'sphinx_math_dollar',
     ]
-
+tikz_proc_suite = 'GhostScript'
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
 
