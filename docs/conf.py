@@ -32,15 +32,17 @@ sys.path.insert(0, os.path.abspath('../hfhd/'))
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
 # ones.
 extensions = ['sphinx.ext.autodoc',
-    'sphinx.ext.mathjax', 'sphinxcontrib.tikz', 'sphinx_automodapi.automodapi',
-    'sphinx.ext.autosummary',
-    # 'sphinxcontrib.napoleon'
-    'numpydoc',
-    # 'sphinx.ext.doctest',
-    'sphinx.ext.viewcode',
-    'sphinx.ext.graphviz',
-    'sphinx_math_dollar',
-    ]
+            'sphinx.ext.mathjax',
+            'sphinxcontrib.tikz',
+            'sphinx_automodapi.automodapi',
+            'sphinx.ext.autosummary',
+            # 'sphinxcontrib.napoleon'
+            'numpydoc',
+            # 'sphinx.ext.doctest',
+            'sphinx.ext.viewcode',
+            'sphinx.ext.graphviz',
+            'sphinx_math_dollar',
+            ]
 tikz_proc_suite = 'GhostScript'
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']

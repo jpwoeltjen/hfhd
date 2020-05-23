@@ -28,6 +28,17 @@ REQUIRED = [
 # What packages are optional?
 EXTRAS = {
     'dev': ['pytest>=5.0'],
+    'docs': ['Sphinx==3.0.3'
+             'sphinx-automodapi==0.12',
+             'sphinx-math-dollar==1.1.1',
+             'sphinxcontrib-devhelp==1.0.2',
+             'sphinxcontrib-htmlhelp==1.0.3',
+             'sphinxcontrib-jsmath==1.0.1',
+             'sphinxcontrib-qthelp==1.0.3',
+             'sphinxcontrib-serializinghtml==1.1.4',
+             'sphinxcontrib-tikz==0.4.8',
+             'sphinxcontrib-websupport==1.2.2',
+             'numpydoc==0.9.2]']
 }
 
 # The rest you shouldn't have to touch too much :)
