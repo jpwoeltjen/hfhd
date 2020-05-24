@@ -318,9 +318,10 @@ def nonlinear_shrinkage(X):
     Neither $\mathbf{\Sigma}^{1/2}$ nor
     $\mathbf{Z}$ are observed on their own. This assumption might not be
     satisfied if the data generating process is a factor model. Use
-    :func:`~nercome` or :func:`~nerive` if this this assumption is violated.
+    :func:`~nercome` or :func:`~nerive` if you believe the assumption is
+    in your dataset violated.
     Theorem 3.1 of Ledoit and Wolf (2018) states that under their assumptions
-    and general asymptotics the MV-loss is minimized by an rotation equivariant
+    and general asymptotics the MV-loss is minimized by a rotation equivariant
     covariance estimator, where the elements of the diagonal matrix are
     \begin{equation}
     \label{eqn: oracle diag}
@@ -335,7 +336,7 @@ def nonlinear_shrinkage(X):
     [\pi c x f(x)]^{2}+\left[1-c-\pi c x \mathcal{H}_{f}(x)\right]^{2}},
     \end{equation}
     where $\mathcal{H}_{g}(x)$ is the Hilbert transform. As per Definition 2
-    of \citet{ledoit2018analytical} it is defined as
+    of Ledoit and Wolf (2018) it is defined as
     \begin{equation}
     \forall x \in \mathbb{R} \quad \mathcal{H}_{g}(x):=\frac{1}{\pi} P V
     \int_{-\infty}^{+\infty} g(t) \frac{d t}{t-x},
@@ -681,9 +682,15 @@ def nerive(tick_series_list, stp=None, estimator=None, **kwargs):
 
     """
     # TODO extend to multiple days
+    last_series_date = None
     for series in tick_series_list:
-        assert series.index[0].date == series.index[-1].date,\
-            "All ticks times must be contained within one day."
+        assert series.index[0].date() == series.index[-1].date(),\
+            """All tick times must be contained within one day. NERIVE is an
+             intraday estimator."""
+        if last_series_date is not None:
+            assert series.index[0].date() == last_series_date,\
+                """The date of tick times of all assets must be equal."""
+        last_series_date = series.index[0].date()
 
     if estimator is None:
         estimator = hf.msrc_pairwise
