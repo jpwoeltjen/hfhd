@@ -945,7 +945,5 @@ def to_corr(cov):
            [0.5, 1. ]])
 
     """
-
-    # L = np.linalg.cholesky(np.diag(1/np.diag(cov)))
     L = np.diag(1./np.sqrt(np.diag(cov)))
     return L @ cov @ L.T

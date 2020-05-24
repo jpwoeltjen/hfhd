@@ -45,8 +45,7 @@ def test_msrc_exog_K():
 
 def test_msrc_pairwise_endog_K():
     tick_series_list = [mock_prices[c].dropna() for c in mock_prices.columns]
-    indeces = tuple([np.array(x.index, dtype='uint64') for x in tick_series_list])
-    values = tuple([x.to_numpy(dtype='float64')[:, None] for x in tick_series_list])
+    indeces, values = hf._get_indeces_and_values(tick_series_list)
     K = None
     cov = hf._msrc_pairwise(indeces, values, K=K)
     # print(repr(cov))
@@ -60,8 +59,7 @@ def test_msrc_pairwise_endog_K():
 
 def test_msrc_pairwise_exog_K():
     tick_series_list = [mock_prices[c].dropna() for c in mock_prices.columns]
-    indeces = tuple([np.array(x.index, dtype='uint64') for x in tick_series_list])
-    values = tuple([x.to_numpy(dtype='float64')[:, None] for x in tick_series_list])
+    indeces, values = hf._get_indeces_and_values(tick_series_list)
     K = np.arange(1, 10)
     cov = hf._msrc_pairwise(indeces, values, K=K)
     # print(repr(cov))

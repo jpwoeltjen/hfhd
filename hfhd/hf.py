@@ -179,8 +179,8 @@ def _refresh_time(indeces, values):
     The computationally expensive iteration of :func:`~refresh_time`
     is accelerated with Numba.
 
-    Parameters:
-    ___________
+    Parameters
+    ----------
     indeces : a tuple or list of numpy.ndarrays, int64
         The length is equal to the number of assets. Each numpy.ndarray contains
         the unix time of ticks of one asset.
@@ -322,12 +322,18 @@ def _preaverage(data, weight):
     Preaverage an observation matrix with shape = (n, p) given a weight vector
     with shape = (K-1, p).
 
-    Parameter
-    ---------
+    Parameters
+    ----------
     data : numpy.ndarray, shape = (n, p)
         The observation matrix of synchronized log-returns.
     weight : numpy.ndarray, shape = (K-1, )
         The weight vector, looking back K -2 time steps.
+
+    Returns
+    -------
+    data_pa : numpy.ndarray, shape = (n, p)
+        The preaveraged returns.
+
 
     """
 
@@ -366,6 +372,38 @@ def _upper_triangular_indeces(p):
     return idx
 
 
+def _get_indeces_and_values(tick_series_list):
+    """
+    Get indeces and values each as 2d numpy.ndarray.
+
+    Parameters
+    ----------
+    tick_series_list : list of pd.Series
+        Each pd.Series contains ticks of one asset with datetime index.
+
+    Returns
+    -------
+    indeces :  numpy.ndarray, dtype='uint64', shape = (p, n_max)
+        where p is the number of assets and n_max is the length of the
+        longest pd.Series.
+    values : numpy.ndarray, dtype='float64', shape = (p, n_max)
+        where p is the number of assets and n_max is the length of the
+        longest pd.Series.
+
+    """
+    n_max = np.max([len(x) for x in tick_series_list])
+    indeces = np.empty((len(tick_series_list), n_max), dtype='uint64')
+    indeces[:, :] = np.nan
+    values = np.empty((len(tick_series_list), n_max), dtype='float64')
+    values[:, :] = np.nan
+    for i, x in enumerate(tick_series_list):
+        idx = np.array(x.dropna().index, dtype='uint64')
+        v = np.array(x.dropna().to_numpy(), dtype='float64')
+        indeces[i, :idx.shape[0]] = idx[:]
+        values[i, :idx.shape[0]] = v[:]
+    return indeces, values
+
+
 def msrc(tick_series_list, K=None, pairwise=True):
     r"""
     The multi-scale realized volatility (MSRV) estimator of Zhang (2006).
@@ -377,6 +415,7 @@ def msrc(tick_series_list, K=None, pairwise=True):
     ----------
     tick_series_list : list of pd.Series
         Each pd.Series contains ticks of one asset with datetime index.
+        Must not contain nans.
     K : numpy.ndarray
         An array of sclales, default= ``None``.
         If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
@@ -478,9 +517,9 @@ def msrc(tick_series_list, K=None, pairwise=True):
 
     """
     if pairwise:
-        indeces = tuple([np.array(x.index, dtype='uint64') for x in tick_series_list])
-        values = tuple([x.to_numpy(dtype='float64')[:, None] for x in tick_series_list])
+        indeces, values = _get_indeces_and_values(tick_series_list)
         cov = _msrc_pairwise(indeces, values, K=K)
+
     else:
         data = refresh_time(tick_series_list)
         data = data.to_numpy().T
@@ -491,7 +530,7 @@ def msrc(tick_series_list, K=None, pairwise=True):
     return cov
 
 
-@numba.njit(fastmath=False, parallel=False)
+@numba.njit#(numba.float64[:,:](numba.float64[:,:],numba.int64[:]), fastmath=False, parallel=False)
 def _msrc(data, K=None):
     r"""
     The inner function of :func:`~msrc`, not pairwise. The multi-scale realized
@@ -585,19 +624,18 @@ def _msrc(data, K=None):
     return n*s
 
 
-# This loop is no bottleneck
-# @numba.njit(cache=False, parallel=True)
+@numba.njit(cache=False, parallel=True)
 def _msrc_pairwise(indeces, values, K=None):
     """
     Accelerated inner function of pairwise :func:`msrc`.
 
-    Parameters:
-    ___________
-    indeces : a tuple or list of numpy.ndarrays
-        The length is equal to the number of assets. Each numpy.ndarray contains
+    Parameters
+    ----------
+    indeces : numpy.ndarray, shape(p, n_max), dtype='uint64'
+        The length is equal to the number of assets. Each 'row' contains
         the unix time of ticks of one asset.
-    values : a tuple or list of numpy.ndarrays, >0
-        Each numpy.ndarray contains the prices of ticks of one asset.
+    values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
+        Each 'row' contains the prices of ticks of one asset.
     K : numpy.ndarray
         An array of sclales.
 
@@ -607,22 +645,32 @@ def _msrc_pairwise(indeces, values, K=None):
         The integrated ovariance matrix using the pairwise synchronized data.
 
     """
-    p = len(indeces)
+    p = indeces.shape[0]
     sd = np.zeros(p)
     corr = np.ones((p, p))
 
-    # putting numbers in array in pure Python usually takes less than 1%
-    # of total time
+    # don't loop over ranges but get all indeces in advance
+    # to improve parallelization.
     idx = _upper_triangular_indeces(p)
     for t in prange(len(idx)):
         i, j = idx[t, :]
 
+        # get the number of no nan values for asset i and j.
+        # This is needed since nan is not defined
+        # for int64, which are in the indeces. Hence, I use the fact that
+        # values and indeces have the same shape and nans are only at the
+        # end of an array.
+        n_not_nans_i = values[i][~np.isnan(values[i])].shape[0]
+        n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
+
         if i == j:
-            sd[i] = np.sqrt(_msrc(values[i].T, K))[0, 0]
+            sd[i] = np.sqrt(_msrc(values[i, :n_not_nans_i].reshape(1, -1), K))[0, 0]
         else:
             merged_values, _ = _refresh_time(
-                (indeces[i], indeces[j]),
-                (values[i].flatten(), values[j].flatten()))
+                (indeces[i, :n_not_nans_i],
+                 indeces[j, :n_not_nans_j]),
+                (values[i, :n_not_nans_i],
+                 values[j, :n_not_nans_j]))
 
             # numba doesn't support boolean indexing of 2d array
             merged_values = merged_values.flatten()
@@ -942,8 +990,7 @@ def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True
     p = len(tick_series_list)
 
     if pairwise and p > 1:
-        indeces = tuple([np.array(x.index, dtype='uint64') for x in tick_series_list])
-        values = tuple([x.to_numpy(dtype='float64')[:, None] for x in tick_series_list])
+        indeces, values = _get_indeces_and_values(tick_series_list)
         cov = _mrc_pairwise(indeces, values, theta, g, bias_correction)
     else:
         if p > 1:
@@ -1025,18 +1072,18 @@ def _mrc(data, theta, g, bias_correction):
     return mrc
 
 
-# @numba.njit(cache=False, parallel=False, fastmath=False)
+@numba.njit(cache=False, parallel=True, fastmath=False)
 def _mrc_pairwise(indeces, values, theta, g, bias_correction):
     r"""
     Accelerated inner function of pairwise :func:`~mrc`.
 
-    Parameters:
-    ___________
-    indeces : a tuple or list of numpy.ndarrays
-        The length is equal to the number of assets. Each numpy.ndarray contains
+    Parameters
+    ----------
+    indeces : numpy.ndarray, shape(p, n_max), dtype='uint64'
+        The length is equal to the number of assets. Each 'row' contains
         the unix time of ticks of one asset.
-    values : a tuple or list of numpy.ndarrays, >0
-        Each numpy.ndarray contains the prices of ticks of one asset.
+    values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
+        Each 'row' contains the prices of ticks of one asset.
     theta : float, optional, default=0.4
         theta is used to determine the preaveraging window ``k``.
         If ``bias_correction`` is True (see below)
@@ -1060,27 +1107,33 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
 
 
     """
-    p = len(indeces)
+    p = indeces.shape[0]
     sd = np.zeros(p)
     corr = np.ones((p, p))
 
-    # Don't do:
-    # for i in prange(p):
-    #     for j in range(i, p):
-    # since it is slower
+    # don't loop over ranges but get all indeces in advance
+    # to improve parallelization.
     idx = _upper_triangular_indeces(p)
-
     for t in prange(len(idx)):
         i, j = idx[t, :]
 
+        # get the number of no nan values for asset i and j.
+        # This is needed since nan is not defined
+        # for int64, which are in the indeces. Hence, I use the fact that
+        # values and indeces have the same shape and nans are only at the
+        # end of an array.
+        n_not_nans_i = values[i][~np.isnan(values[i])].shape[0]
+        n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
+
         if i == j:
-            data = np.log(values[i])
+            data = np.log(values[i, :n_not_nans_i]).reshape(-1, 1)
             data = data[1:, :] - data[:-1, :]
             sd[i] = np.sqrt(_mrc(data, theta, g, bias_correction))[0, 0]
         else:
-            merged_values, _ = _refresh_time(
-                (indeces[i], indeces[j]),
-                (values[i].flatten(), values[j].flatten()))
+            merged_values, _ = _refresh_time((indeces[i, :n_not_nans_i],
+                                             indeces[j, :n_not_nans_j]),
+                                             (values[i, :n_not_nans_i],
+                                              values[j, :n_not_nans_j]))
 
             # numba doesn't support boolean indexing of 2d array
             merged_values = merged_values.flatten()

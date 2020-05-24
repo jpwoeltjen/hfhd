@@ -33,6 +33,9 @@ The log-price of each asset is observed at discrete times and with market micros
 \end{equation}
 where $\epsilon^{(j)}_t$ is a noise process independent of $\mathbf{X}_t$ with mean 0. $\left\{\epsilon_{t}\right\}_{0 \leq t \leq T}$ is assumed to be adapted to $\left\{\mathcal{F}_{t}\right\}_{0 \leq t \leq T}$. Hence, the observed price process $\left\{{Y}^{(j)}_{t}\right\}_{0 \leq t \leq T}$ is also adapted. The microstructure noise is the resulting process of an interplay of many effects. Among them are for example price discreteness and the bid–ask bounce. When the interest lies on the integrated covariance matrix of the underlying return process, it is important to account for the variance due to the noise process. When the observation frequency is high, the variance due to the the noise process dominates the variance of the underlying process and estimators that do not cancel the noise are severely biased. 
 
+.. note::
+    Accelerated functions are compiled Just In Time (JIT). This may cause the first call to be several orders of magnitude slower than the following calls.
+
 Design Philosophy
 -----------------
 
@@ -40,7 +43,8 @@ hfhd is written with the following priciples in mind:
 
  - Thorough and notationally consistent documentation, explaining not only the code but also the theory behind it.
  - The code needs to run sufficiently fast to be usable. Since many functions are inherently iterative, JIT compilation with Numba is used throughout to speed things up.
- - A user friendly API with consistent inputs and outputs.
+ - The API should be user friendly with consistent inputs and outputs.
+
 
 .. toctree::
    :maxdepth: 2
