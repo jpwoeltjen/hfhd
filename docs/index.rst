@@ -13,6 +13,12 @@ To install hfhd run
 
    $ pip install hfhd
 
+If you experience problems with the parallelism, you may need to install/upgrade the Threading Building Blocks (TBB). The easiest way is to
+
+.. code-block:: console
+
+   $ conda install tbb
+
 
 The Price Process
 -----------------
@@ -48,9 +54,9 @@ hfhd is written with the following priciples in mind:
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
 
    modules
+
 
 Indices and tables
 ==================

@@ -316,7 +316,7 @@ def preaverage(data, K=None, g=None, return_K=False):
         return data_pa
 
 
-@numba.njit(cache=False, parallel=True, fastmath=False)
+@numba.njit(cache=False, parallel=False, fastmath=False)
 def _preaverage(data, weight):
     """
     Preaverage an observation matrix with shape = (n, p) given a weight vector
@@ -374,7 +374,8 @@ def _upper_triangular_indeces(p):
 
 def _get_indeces_and_values(tick_series_list):
     """
-    Get indeces and values each as 2d numpy.ndarray.
+    Get indeces and values each as 2d numpy.ndarray from a list of
+    pd.Series.
 
     Parameters
     ----------
@@ -530,7 +531,7 @@ def msrc(tick_series_list, K=None, pairwise=True):
     return cov
 
 
-@numba.njit#(numba.float64[:,:](numba.float64[:,:],numba.int64[:]), fastmath=False, parallel=False)
+@numba.njit(fastmath=False, parallel=False)
 def _msrc(data, K=None):
     r"""
     The inner function of :func:`~msrc`, not pairwise. The multi-scale realized
@@ -1411,64 +1412,106 @@ def hayashi_yoshida(tick_series_list, theta=0):
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
     >>> icov = hayashi_yoshida([series_a, series_b])
     >>> icov
-    array([[0.98257839, 0.51168387],
-           [0.51168387, 0.98992023]])
+    array([[0.98257839, 0.51168389],
+           [0.51168389, 0.98992023]])
     """
-    p = len(tick_series_list)
-    cov = np.zeros((p, p))
+    indeces, values = _get_indeces_and_values(tick_series_list)
+    p = indeces.shape[0]
 
-    indeces = tuple([np.array(x.index, dtype='uint64')
-                     for x in tick_series_list])
-
+    # get log-returns
+    values = np.log(values)
+    values = np.diff(values, axis=1)
     # do not drop first nan which results from diff since its index
-    # is used to determine first interval.
-    values = tuple([np.diff(np.log(x.to_numpy(dtype='float64')),
-                            prepend=np.nan)[:, None]
-                   for x in tick_series_list])
+    # is used to determine first interval. Instead put column of zeros.
+    values = np.column_stack((np.zeros(p), values))
 
-    for i in range(p):
-        for j in range(i, p):
-            # for efficiency set slower trading asset to ``a``.
-            if values[i].shape[0] <= values[j].shape[0]:
-                a_values = values[i]
-                a_index = indeces[i]
-                b_values = values[j]
-                b_index = indeces[j]
-
-            else:
-                b_values = values[i]
-                b_index = indeces[i]
-                a_values = values[j]
-                a_index = indeces[j]
-
-            a_values[0, 0] = 0
-            b_values[0, 0] = 0
-
-            if theta > 0:
-                # set k as recommended in Christensen et al. (2010)
-                k = int(np.ceil(np.power(a_values.shape[0] + b_values.shape[0],
-                                         0.5) * theta))
-                weight = _numba_minimum(np.arange(1, k)/k)
-
-                if k > 1:
-                    # Preaverage and adjust according to Eqn (27) of
-                    # Christensen et al. (2010).
-                    # psi_HY = np.sum(g(np.arange(1, k)/k))/k = 1/4 for weight
-                    # function chosen as def g(x): return np.minimum(x, 1-x)
-                    a_values = _preaverage(a_values, weight) / (k / 4)
-                    b_values = _preaverage(b_values, weight) / (k / 4)
-
-            else:
-                k = 1
-
-            hy = _hayashi_yoshida(a_index[k-1:], b_index[k-1:],
-                                  a_values[k-1:], b_values[k-1:], k)
-            cov[i, j] = hy
-            cov[j, i] = hy
+    cov = _hayashi_yoshida_pairwise(indeces, values, theta)
     return cov
 
 
 @numba.njit(cache=False, parallel=True, fastmath=False)
+def _hayashi_yoshida_pairwise(indeces, values, theta):
+    r"""
+    The pairwise computation of the integrated covariance matrix
+    in :func:`~hayashi_yoshida` using :func:`~_hayashi_yoshida` is
+    accelerated and parallelized.
+
+    Parameters
+    ----------
+    indeces : numpy.ndarray, shape(p, n_max), dtype='uint64'
+        The length is equal to the number of assets. Each 'row' contains
+        the unix time of ticks of one asset.
+    values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
+        Each 'row' contains the tick-log-returns of one asset.
+    theta : float, theta>=0, default=0
+        If theta>0, the log-returns are preaveraged with theta and
+        :math:`g(x) = min(x, 1-x)`. Hautsch and Podolskij (2013) suggest
+        values between 0.4 (for liquid stocks) and 0.6 (for less
+        liquid stocks).
+        If theta = 0, this is the standard HY estimator.
+
+    Returns
+    -------
+    cov : numpy.ndarray
+        The pairwise HY estimate of the integrated covariance matrix.
+    """
+    p = indeces.shape[0]
+    cov = np.zeros((p, p))
+
+    # don't loop over ranges but get all indeces in advance
+    # to improve parallelization.
+    idx = _upper_triangular_indeces(p)
+    for t in prange(len(idx)):
+        i, j = idx[t, :]
+
+        # get the number of no nan values for asset i and j.
+        # This is needed since nan is not defined
+        # for int64, which are in the indeces. Hence, I use the fact that
+        # values and indeces have the same shape and nans are only at the
+        # end of an array.
+        n_not_nans_i = values[i][~np.isnan(values[i])].shape[0]
+        n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
+
+        # for efficiency set slower trading asset to ``a``.
+        if n_not_nans_i <= n_not_nans_j:
+            a_values = values[i, :n_not_nans_i]
+            a_index = indeces[i, :n_not_nans_i]
+            b_values = values[j, :n_not_nans_j]
+            b_index = indeces[j, :n_not_nans_j]
+
+        else:
+            b_values = values[i, :n_not_nans_i]
+            b_index = indeces[i, :n_not_nans_i]
+            a_values = values[j, :n_not_nans_j]
+            a_index = indeces[j, :n_not_nans_j]
+
+        if theta > 0:
+            # set k as recommended in Christensen et al. (2010)
+            k = int(np.ceil(np.power(a_values.shape[0] + b_values.shape[0],
+                                     0.5) * theta))
+            weight = _numba_minimum(np.arange(1, k)/k)
+
+            if k > 1:
+                # Preaverage
+                a_values = _preaverage(a_values.reshape(-1, 1), weight).flatten()
+                # and adjust acc. to Eqn (27) of Christensen et al. (2010).
+                # psi_HY = np.sum(g(np.arange(1, k)/k))/k = 1/4 for weight
+                # function chosen as def g(x): return np.minimum(x, 1-x)
+                a_values /= (k / 4)
+                b_values = _preaverage(b_values.reshape(-1, 1), weight).flatten()
+                b_values /= (k / 4)
+
+        else:
+            k = 1
+
+        hy = _hayashi_yoshida(a_index[k-1:], b_index[k-1:],
+                              a_values[k-1:], b_values[k-1:], k)
+        cov[i, j] = hy
+        cov[j, i] = hy
+    return cov
+
+
+@numba.njit(cache=False, parallel=False, fastmath=False)
 def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
     """
     The inner function of :func:`~hayashi_yoshida` is accelerated
@@ -1513,6 +1556,8 @@ def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
         start = a_index[i-step]
         end = a_index[i]
         start_b = np.searchsorted(b_index, start, 'right')
+        # TODO limit search space e.g. end only after start. Currently
+        # insignificant speedup. E.g.:
         # end_b = np.searchsorted(b_index[start_b:], end, 'left') + start_b
         end_b = np.searchsorted(b_index, end, 'left')
         # Don't do:
@@ -1578,10 +1623,48 @@ def epic(tick_series_list,  K=None, theta=0.4, var_weights=None, cov_weights=Non
     cov_mrc = mrc(tick_series_list, theta=theta)
     cov_hy = hayashi_yoshida(tick_series_list, theta=theta)
 
-    p = cov_hy.shape[0]
+    estimates = [cov_msrc, cov_mrc, cov_hy]
+    cov = _ensemble(estimates, var_weights, cov_weights)
+
+    return cov
+
+
+def _ensemble(estimates,  var_weights, cov_weights):
+    """
+    Ensemble multiple covariance matrix estimates with weights given
+    by ``var_weights`` and ``cov_weights`` for the diagonal and
+    off-diagonal elements, respectively.
+
+    Parameters
+    ----------
+    estimates : list of numpy.ndarrays with shape = (p, p)
+        The covariance matrix estimates.
+        var_weights :  numpy.ndarray
+        The weights with which the  diagonal elements of the MSRC, MRC, and
+        the preaveraged HY covariance estimates are weighted, respectively.
+        The weights must sum to one.
+    cov_weights : numpy.ndarray
+        The weights with which the off-diagonal elements of the MSRC, MRC, and
+        the preaveraged HY covariance estimates are weighted, respectively. The
+        HY estimator uses the data more efficiently and thus may deserve a
+        higher weight. The weights must sum to one.
+
+    Returns
+    -------
+    cov : numpy.ndarray
+        The ensemble estimate of the integrated covariance matrix.
+    """
+
+    p, p_prime = estimates[0].shape
+
+    assert p == p_prime, "The covariance matrices must be square."
+
+    cov = np.zeros((p, p))
     V = np.eye(p)
     C = np.ones((p, p)) - V
-    cov = ((var_weights[0] * V + cov_weights[0] * C) * cov_msrc
-           + (var_weights[1] * V + cov_weights[1] * C) * cov_mrc
-           + (var_weights[2] * V + cov_weights[2] * C) * cov_hy)
+
+    for i, estimate in enumerate(estimates):
+        assert estimate.shape == (p, p), \
+         "All estimates must have same dimension."
+        cov += (var_weights[i] * V + cov_weights[i] * C) * estimate
     return cov
