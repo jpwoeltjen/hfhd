@@ -2,7 +2,10 @@
 The hf module provides functions for synchronization of asynchronously
 observed multivariate time series and observation noise cancelling. When
 possible, functions are parallelized and accelerated via JIT compilation
-with Numba. Every estimator takes ``tick_series_list`` as the first argument.
+with Numba. By default all cores of your machine are used. If your pipeline
+allows for parallelization on a higher level, it is preferable to do so. You
+may manually set the number of cores used by numba.set_num_threads(n).
+Every estimator takes ``tick_series_list`` as the first argument.
 This is a list of pd.Series (one for each asset) containing tick prices with
 pandas.DatetimeIndex. The output is the integrated covariance matrix estimate
 as a 2d numpy.ndarray.
@@ -13,6 +16,7 @@ import pandas as pd
 from hfhd import hd
 import numba
 from numba import prange
+import warnings
 
 
 def refresh_time(tick_series_list):
@@ -451,8 +455,8 @@ def msrc(tick_series_list, K=None, pairwise=True):
            [ 0.45281646,  2.17269871]])
     >>> # This is the unbiased,  corrected integrated covariance matrix estimate.
     >>> icov_c
-    array([[0.88110066, 0.43967568],
-           [0.43967568, 0.9788656 ]])
+    array([[0.90361064, 0.48705002],
+           [0.48705002, 0.98514774]])
 
     Notes
     -----
@@ -577,19 +581,19 @@ def _msrc(data, K=None):
            [ 0.45281646,  2.17269871]])
     >>> # This is the unbiased corrected integrated covariance matrix estimate.
     >>> icov_c
-    array([[0.8883794 , 0.44154245],
-           [0.44154245, 0.97910697]])
+    array([[0.89731589, 0.48705002],
+           [0.48705002, 0.9801241 ]])
     >>> # In the univariate case we add an axis
     >>> univariate_ticks = series_a.values[:, None]
     >>> ivar_c = _msrc(univariate_ticks.T)
     >>> ivar_c
-    array([[0.88110066]])
+    array([[0.90361064]])
     """
 
     p, n = data.shape
     if K is None:
         # Opt M according to Eqn (34) of Zhang (2006)
-        M = int(n**(1/2))
+        M = int(np.ceil(0.5*n**(1/2)))
         K = np.arange(1, M+1)
 
     K_mean = np.mean(K)
@@ -647,12 +651,12 @@ def _msrc_pairwise(indeces, values, K=None):
 
     """
     p = indeces.shape[0]
-    sd = np.zeros(p)
-    corr = np.ones((p, p))
+    cov = np.ones((p, p))
 
     # don't loop over ranges but get all indeces in advance
     # to improve parallelization.
     idx = _upper_triangular_indeces(p)
+
     for t in prange(len(idx)):
         i, j = idx[t, :]
 
@@ -665,7 +669,7 @@ def _msrc_pairwise(indeces, values, K=None):
         n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
 
         if i == j:
-            sd[i] = np.sqrt(_msrc(values[i, :n_not_nans_i].reshape(1, -1), K))[0, 0]
+            cov[i, i] = _msrc(values[i, :n_not_nans_i].reshape(1, -1), K)[0, 0]
         else:
             merged_values, _ = _refresh_time(
                 (indeces[i, :n_not_nans_i],
@@ -678,12 +682,9 @@ def _msrc_pairwise(indeces, values, K=None):
             merged_values = merged_values[~np.isnan(merged_values)]
             merged_values = merged_values.reshape(-1, 2)
 
-            pw_cov = _msrc(merged_values.T, K)
-            corr[i, j] = hd.to_corr(pw_cov)[0, 1]
-            corr[j, i] = corr[i, j]
+            cov[i, j] = _msrc(merged_values.T, K)[0, 1]
+            cov[j, i] = cov[i, j]
 
-    D = np.diag(sd)
-    cov = D @ corr @ D
     return cov
 
 
@@ -890,8 +891,8 @@ def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True
     >>> # Use ticks more efficiently by pairwise estimation
     >>> icov_c = mrc([series_a, series_b], pairwise=True)
     >>> icov_c
-    array([[0.84992681, 0.40933702],
-           [0.40933702, 0.88393458]])
+    array([[0.84992681, 0.4066328 ],
+           [0.4066328 , 0.88393458]])
 
     Notes
     -----
@@ -1002,6 +1003,7 @@ def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True
             data = np.diff(np.log(data.to_numpy()), axis=0)[:, None]
 
         cov = _mrc(data, theta, g, bias_correction)
+
     return cov
 
 
@@ -1109,12 +1111,12 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
 
     """
     p = indeces.shape[0]
-    sd = np.zeros(p)
-    corr = np.ones((p, p))
+    cov = np.ones((p, p))
 
     # don't loop over ranges but get all indeces in advance
     # to improve parallelization.
     idx = _upper_triangular_indeces(p)
+
     for t in prange(len(idx)):
         i, j = idx[t, :]
 
@@ -1129,7 +1131,7 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
         if i == j:
             data = np.log(values[i, :n_not_nans_i]).reshape(-1, 1)
             data = data[1:, :] - data[:-1, :]
-            sd[i] = np.sqrt(_mrc(data, theta, g, bias_correction))[0, 0]
+            cov[i, i] = _mrc(data, theta, g, bias_correction)[0, 0]
         else:
             merged_values, _ = _refresh_time((indeces[i, :n_not_nans_i],
                                              indeces[j, :n_not_nans_j]),
@@ -1143,12 +1145,9 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
             data = np.log(merged_values)
             data = data[1:, :] - data[:-1, :]
 
-            pw_cov = _mrc(data, theta, g, bias_correction)
-            corr[i, j] = hd.to_corr(pw_cov)[0, 1]
-            corr[j, i] = corr[i, j]
+            cov[i, j] = _mrc(data, theta, g, bias_correction)[0, 1]
+            cov[j, i] = cov[i, j]
 
-    D = np.diag(sd)
-    cov = D @ corr @ D
     return cov
 
 
@@ -1411,9 +1410,9 @@ def hayashi_yoshida(tick_series_list, theta=0):
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
     >>> icov = hayashi_yoshida([series_a, series_b])
-    >>> icov
-    array([[0.98257839, 0.51168389],
-           [0.51168389, 0.98992023]])
+    >>> np.round(icov, 4)
+    array([[0.9826, 0.5117],
+           [0.5117, 0.9899]])
     """
     indeces, values = _get_indeces_and_values(tick_series_list)
     p = indeces.shape[0]
@@ -1445,9 +1444,8 @@ def _hayashi_yoshida_pairwise(indeces, values, theta):
         Each 'row' contains the tick-log-returns of one asset.
     theta : float, theta>=0, default=0
         If theta>0, the log-returns are preaveraged with theta and
-        :math:`g(x) = min(x, 1-x)`. Hautsch and Podolskij (2013) suggest
-        values between 0.4 (for liquid stocks) and 0.6 (for less
-        liquid stocks).
+        :math:`g(x) = min(x, 1-x)`. Christensen et al. (2013) use
+        ``theta=0.15``.
         If theta = 0, this is the standard HY estimator.
 
     Returns
@@ -1487,7 +1485,8 @@ def _hayashi_yoshida_pairwise(indeces, values, theta):
 
         if theta > 0:
             # set k as recommended in Christensen et al. (2010)
-            k = int(np.ceil(np.power(a_values.shape[0] + b_values.shape[0],
+            k = int(np.ceil(np.power((a_values.shape[0]
+                                     + b_values.shape[0]),
                                      0.5) * theta))
             weight = _numba_minimum(np.arange(1, k)/k)
 
@@ -1568,10 +1567,11 @@ def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
     return hy
 
 
-def epic(tick_series_list,  K=None, theta=0.4, var_weights=None, cov_weights=None):
+def epic(tick_series_list,  K=None, theta_mrc=0.4, theta_hy=0.15,
+         bias_correction=True, var_weights=None, cov_weights=None):
     r"""
     The ensembled pairwise integrated covariance (EPIC) estimator of Woeltjen
-    (2020). The the :func:`msrc` estimator , the :func:`mrc` estimator and the
+    (2020). The :func:`msrc` estimator , the :func:`mrc` estimator and the
     preaveraged :func:`hayashi_yoshida` estimator are ensembled to
     compute an improved finite sample estimate of the pairwise integrated
     covariance matrix. The EPIC estimator uses every available tick, and
@@ -1588,12 +1588,22 @@ def epic(tick_series_list,  K=None, theta=0.4, var_weights=None, cov_weights=Non
         An array of sclales, default= ``None``.
         If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
         chosen as :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
-    theta : float, optional, default=0.4
+    theta_mrc : float, optional, default=0.4
         Theta is used to determine the preaveraging window ``k`` according to
         :math:`k = \theta \sqrt{n}`.
         Hautsch & Podolskij (2013) recommend 0.4 for liquid assets
         and 0.6 for less liquid assets. If ``theta=0``, the mrc estimator
         of the ensemble reduces to the standard realized covariance estimator.
+    theta_hy : float, theta>=0, default=0.15
+        If theta>0, the log-returns for HY are preaveraged with theta and
+        :math:`g(x) = min(x, 1-x)`. Christensen et al. (2013) use
+        ``theta=0.15``.
+        If theta = 0, this is the standard HY estimator.
+    bias_correction : boolean, optional
+        If ``True`` (default) then the estimator is optimized for convergence
+        rate but it might not be p.s.d. Alternatively as described in
+        Christensen et al. (2010) it can be ommited. Then k should be chosen
+        larger than otherwise optimal.
     var_weights :  numpy.ndarray
         The weights with which the  diagonal elements of the MSRC, MRC, and
         the preaveraged HY covariance estimates are weighted, respectively.
@@ -1620,8 +1630,10 @@ def epic(tick_series_list,  K=None, theta=0.4, var_weights=None, cov_weights=Non
         assert np.sum(cov_weights) == 1, "``cov_weights`` must sum to one."
 
     cov_msrc = msrc(tick_series_list, K=K)
-    cov_mrc = mrc(tick_series_list, theta=theta)
-    cov_hy = hayashi_yoshida(tick_series_list, theta=theta)
+    cov_mrc = mrc(tick_series_list,
+                  theta=theta_mrc,
+                  bias_correction=bias_correction)
+    cov_hy = hayashi_yoshida(tick_series_list, theta=theta_hy)
 
     estimates = [cov_msrc, cov_mrc, cov_hy]
     cov = _ensemble(estimates, var_weights, cov_weights)

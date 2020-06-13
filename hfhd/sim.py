@@ -10,7 +10,8 @@ from hfhd import hd
 
 @numba.njit
 def garch_11(n, sigma_sq_0, mu, alpha, beta, omega):
-    r""" Generate GARCH(1, 1) log-returns of size n.
+    r"""
+    Generate GARCH(1, 1) log-returns of size n.
     This function is accelerated via JIT with Numba.
 
     Parameters
@@ -125,7 +126,7 @@ class Universe:
 
     def __init__(self, feature_beta, factor_garch_spec, industry_garch_spec,
                  resid_garch_spec, factor_loadings, industry_loadings,
-                 liquidity=0.5, gamma=1e6, freq='m'):
+                 liquidity=0.5, gamma=2, freq='m'):
         self.feature_beta = feature_beta
         self.factor_garch_spec = factor_garch_spec
         self.industry_garch_spec = industry_garch_spec
@@ -290,7 +291,7 @@ class Universe:
 
         # These are the 'continuous' underlying prices.
         # Note that the price acquires a drift of size sigma^2_t/2.
-        self.price = 100 * (np.exp(self.log_rets.cumsum(axis=0)))
+        self.price = 100 * np.exp(self.log_rets.cumsum(axis=0))
 
         # generate microstructure noise
         self.ms_noise = np.random.normal(0, 1, self.price.size).reshape(
@@ -302,9 +303,10 @@ class Universe:
                                                replace=False)] = np.nan
 
         # resulting price is non-synchronously sampled with microstructure
-        # noise, which is scaled by gamma and the return std.
-        self.price = \
-            self.price + self.gamma * np.sqrt(self.sigma_sq_resid) * self.ms_noise
+        # noise, which is scaled by price such that price does not get negative.
+        # Intuitively, a 1000 dollar stock has a larger (absolute cent) spread then
+        # 30 dollar stock.
+        self. price *= (1 + self.gamma * self.ms_noise)
 
         self.cum_feature = self.feature.cumsum(axis=0)
         self.price = pd.DataFrame(self.price)
@@ -382,6 +384,11 @@ def simple(size, corr_matrix, spec, liquidity, gamma):
         The microstructure noise will be zero-mean Gaussian with variance
         $\gamma^2 var(r)$, where $var(r)$ is the variance of the
         underlying true return process.  This noise is be added to the price.
+
+    Returns
+    -------
+    price : numpy.ndarray, shape = (size, p)
+        The p-dimensional price time series.
     """
 
     n, p = size, corr_matrix.shape[0]
@@ -393,7 +400,7 @@ def simple(size, corr_matrix, spec, liquidity, gamma):
     # These are the continuous underlying prices. The price
     # process acquires the drift term ``var/2`` due to the exponential
     # function (rf. SDE of Geometric Brownian Motion)
-    price = 100*np.exp((log_rets - var/2).cumsum(axis=0))
+    price = 100 * np.exp((log_rets - var/2).cumsum(axis=0))
 
     # generate microstructure noise
     ms_noise = np.random.normal(0, 1, price.size).reshape(
@@ -405,6 +412,8 @@ def simple(size, corr_matrix, spec, liquidity, gamma):
                                       replace=False)] = np.nan
 
     # resulting price is non-synchronously sampled with microstructure
-    # noise, which is scaled by price such that price does not get negative
-    price = price + gamma * np.sqrt(var) * ms_noise
+    # noise, which is scaled by price such that price does not get negative.
+    # Intuitively, a 1000 dollar stock has a larger (absolute cent) spread then
+    # 30 dollar stock.
+    price *= (1 + gamma * ms_noise)
     return price
