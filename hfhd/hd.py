@@ -613,6 +613,28 @@ def _nonlinear_shrinkage_cov(S, n):
     return sigmatilde
 
 
+def _get_partitions(L):
+    """
+    Get intraday partitions for NERIVE.
+
+    Parameters
+    ----------
+    L : int > 1
+        The number of partitions.
+
+    Returns
+    -------
+    stp : list
+        The list of datetime.time objects.
+    """
+
+    stp = [(datetime.datetime(2000, 1, 1, 9, 30)
+           + datetime.timedelta(minutes=np.ceil(6.5/L*60)) * i).time()
+           for i in range(L)]
+    stp.append(datetime.time(16, 0))
+    return stp
+
+
 def nerive(tick_series_list, stp=None, estimator=None, **kwargs):
     r"""
     The nonparametric eigenvalue-regularized integrated covariance matrix
@@ -674,6 +696,10 @@ def nerive(tick_series_list, stp=None, estimator=None, **kwargs):
     Similar to NERCOME, NERIVE allows for the presence of pervasive factors as
     long as they persist between refresh times.
 
+    .. note::
+        NERIVE splits the data into smaller subsamples. Estimator
+        parameters that depend on the sample size amust be adjusted.
+
     References
     ----------
     Lam, C. and Feng, P. (2018). A nonparametric eigenvalue-regularized
@@ -681,7 +707,8 @@ def nerive(tick_series_list, stp=None, estimator=None, **kwargs):
     Journal of Econometrics 206(1): 226–257.
 
     """
-    # TODO extend to multiple days
+    # TODO extend to multiple days, each partition should then be
+    # one day and the cov for eigenmatrix is average of individual day covs.
     last_series_date = None
     for series in tick_series_list:
         assert series.index[0].date() == series.index[-1].date(),\
@@ -696,7 +723,7 @@ def nerive(tick_series_list, stp=None, estimator=None, **kwargs):
         estimator = hf.msrc_pairwise
 
     if stp is None:
-        stp = [datetime.time(9, 30), datetime.time(12, 45), datetime.time(16, 0)]
+        stp = _get_partitions(4)
 
     L = len(stp) - 1
     Sigma_hat_list = []

@@ -19,56 +19,59 @@ def test_refresh_time():
     assert previous_ticks.equals(mock_previous_ticks)
 
 
-def test_msrc_endog_K():
+def test_msrc_endog_M():
     data = mock_previous_ticks.to_numpy().T
-    cov = hf._msrc(data, K=None)
+    data = np.log(data)
+    cov = hf._msrc(data, M=None, N=0)
     # print(repr(cov))
     assert np.allclose(cov, np.array([
-       [0.00075407, 0.00062263, 0.00066578, 0.00060698, 0.00058534],
-       [0.00062263, 0.00066466, 0.00055861, 0.00052145, 0.0004985 ],
-       [0.00066578, 0.00055861, 0.00065808, 0.00052095, 0.00047078],
-       [0.00060698, 0.00052145, 0.00052095, 0.00060805, 0.00045969],
-       [0.00058534, 0.0004985 , 0.00047078, 0.00045969, 0.0005235 ]]))
+       [0.0008317 , 0.0007167 , 0.00071347, 0.0006525 , 0.00060715],
+       [0.0007167 , 0.0008152 , 0.00062824, 0.00058448, 0.00055081],
+       [0.00071347, 0.00062824, 0.00065065, 0.00054136, 0.00048738],
+       [0.0006525 , 0.00058448, 0.00054136, 0.00059112, 0.00047452],
+       [0.00060715, 0.00055081, 0.00048738, 0.00047452, 0.00051674]]))
 
 
-def test_msrc_exog_K():
+def test_msrc_exog_M():
     data = mock_previous_ticks.to_numpy().T
-    K = np.arange(1, 3)
-    # print(repr(hf.msrc(data, K=K)))
-    assert np.allclose(hf._msrc(data, K=K), np.array([
-       [0.00052136, 0.00042193, 0.00041587, 0.00037207, 0.00040712],
-       [0.00042193, 0.00048021, 0.00035288, 0.00035388, 0.00030816],
-       [0.00041587, 0.00035288, 0.00043437, 0.00035966, 0.00031758],
-       [0.00037207, 0.00035388, 0.00035966, 0.00043275, 0.00034797],
-       [0.00040712, 0.00030816, 0.00031758, 0.00034797, 0.00034418]]))
-
-
-def test_msrc_pairwise_endog_K():
-    tick_series_list = [mock_prices[c].dropna() for c in mock_prices.columns]
-    indeces, values = hf._get_indeces_and_values(tick_series_list)
-    K = None
-    cov = hf._msrc_pairwise(indeces, values, K=K)
+    data = np.log(data)
+    M = 3
+    cov = hf._msrc(data, M=M, N=0)
     # print(repr(cov))
     assert np.allclose(cov, np.array([
-       [0.00049583, 0.00043759, 0.00052237, 0.00043719, 0.00051098],
-       [0.00043759, 0.00047749, 0.00045198, 0.00035414, 0.00044594],
-       [0.00052237, 0.00045198, 0.0005221 , 0.00043053, 0.00046482],
-       [0.00043719, 0.00035414, 0.00043053, 0.00043973, 0.00038522],
-       [0.00051098, 0.00044594, 0.00046482, 0.00038522, 0.00051008]]))
+       [0.00057514, 0.00045695, 0.00047652, 0.00045162, 0.00045289],
+       [0.00045695, 0.00048668, 0.00040435, 0.00039829, 0.0003722 ],
+       [0.00047652, 0.00040435, 0.00050693, 0.00039952, 0.0003482 ],
+       [0.00045162, 0.00039829, 0.00039952, 0.00049079, 0.00037513],
+       [0.00045289, 0.0003722 , 0.0003482 , 0.00037513, 0.0004232 ]]))
 
 
-def test_msrc_pairwise_exog_K():
-    tick_series_list = [mock_prices[c].dropna() for c in mock_prices.columns]
+def test_msrc_pairwise_endog_M():
+    tick_series_list = [np.log(mock_prices[c].dropna()) for c in mock_prices.columns]
     indeces, values = hf._get_indeces_and_values(tick_series_list)
-    K = np.arange(1, 10)
-    cov = hf._msrc_pairwise(indeces, values, K=K)
+    M = None
+    cov = hf._msrc_pairwise(indeces, values, M=M, N=0)
+    print(repr(cov))
+    assert np.allclose(cov, np.array([
+       [0.00061849, 0.00054061, 0.00062699, 0.00050343, 0.00056316],
+       [0.00054061, 0.00065764, 0.00054384, 0.00044973, 0.00056095],
+       [0.00062699, 0.00054384, 0.00064787, 0.00050742, 0.00050674],
+       [0.00050343, 0.00044973, 0.00050742, 0.00051337, 0.00047187],
+       [0.00056316, 0.00056095, 0.00050674, 0.00047187, 0.00056924]]))
+
+
+def test_msrc_pairwise_exog_M():
+    tick_series_list = [np.log(mock_prices[c].dropna()) for c in mock_prices.columns]
+    indeces, values = hf._get_indeces_and_values(tick_series_list)
+    M = 10
+    cov = hf._msrc_pairwise(indeces, values, M=M, N=0)
     # print(repr(cov))
     assert np.allclose(cov, np.array([
-       [0.00052979, 0.00051644, 0.00059787, 0.00048227, 0.00056013],
-       [0.00051644, 0.00054197, 0.00051064, 0.0004271 , 0.00054853],
-       [0.00059787, 0.00051064, 0.00055764, 0.0004913 , 0.00052092],
-       [0.00048227, 0.0004271 , 0.0004913 , 0.00045851, 0.00043555],
-       [0.00056013, 0.00054853, 0.00052092, 0.00043555, 0.00053241]]))
+       [0.00052774, 0.00049755, 0.00058359, 0.00046206, 0.00053488],
+       [0.00049755, 0.00054464, 0.00049249, 0.00041309, 0.0005291 ],
+       [0.00058359, 0.00049249, 0.00056025, 0.00047607, 0.0004977 ],
+       [0.00046206, 0.00041309, 0.00047607, 0.00045242, 0.00042447],
+       [0.00053488, 0.0005291 , 0.0004977 , 0.00042447, 0.00052214]]))
 
 
 def test_preaverage_endog_K():
@@ -210,36 +213,36 @@ def test_preaverage_exog_K_multivariate():
 
 def test__mrc_univariate_with_bias_correction():
     data = np.log(mock_prices.iloc[:, 0]).dropna().diff().dropna()
-    mrc = hf._mrc(data.to_numpy()[:, None], theta=0.4, g=g, bias_correction=True)
+    mrc = hf._mrc(data.to_numpy()[:, None], theta=0.4, k=None, g=g, bias_correction=True)
     # print(repr(mrc))
-    assert np.allclose(mrc, np.array([[0.00031784]]))
+    assert np.allclose(mrc, np.array([[0.00031769]]), atol=1e-04)
 
 
 def test__mrc_univariate_no_bias_correction():
     data = np.log(mock_prices.iloc[:, 0]).dropna().diff().dropna()
-    mrc = hf._mrc(data.to_numpy()[:, None], theta=0.4, g=g, bias_correction=False)
+    mrc = hf._mrc(data.to_numpy()[:, None], theta=0.4, k=None, g=g, bias_correction=False)
     # print(repr(mrc))
-    assert np.allclose(mrc, np.array([[0.00045942]]))
+    assert np.allclose(mrc, np.array([[0.00045942]]), atol=1e-04)
 
 
 def test_mrc__univariate_exog_theta():
     data = np.log(mock_prices.iloc[:, 0]).dropna().diff().dropna()
-    mrc = hf._mrc(data.to_numpy()[:, None], theta=0.1, g=g, bias_correction=False)
+    mrc = hf._mrc(data.to_numpy()[:, None], theta=0.1, k=None, g=g, bias_correction=False)
     # print(repr(mrc))
-    assert np.allclose(mrc, np.array([[0.00039356]]))
+    assert np.allclose(mrc, np.array([[0.00039356]]), atol=1e-04)
 
 
 def test__mrc_multivariate():
     data = np.log(mock_previous_ticks).dropna().diff().dropna()
-    # print(data)
-    mrc = hf._mrc(data.to_numpy(), theta=0.4, g=g, bias_correction=True)
+    mrc = hf._mrc(data.to_numpy(), theta=0.4, g=g, k=None, bias_correction=True)
     # print(repr(mrc))
     assert np.allclose(mrc, np.array([
        [0.00041211, 0.0003256 , 0.00032493, 0.00030336, 0.00031333],
        [0.0003256 , 0.00036603, 0.0002744 , 0.00027635, 0.00025101],
        [0.00032493, 0.0002744 , 0.00034153, 0.00027569, 0.00024066],
        [0.00030336, 0.00027635, 0.00027569, 0.00034405, 0.00026226],
-       [0.00031333, 0.00025101, 0.00024066, 0.00026226, 0.00028646]]))
+       [0.00031333, 0.00025101, 0.00024066, 0.00026226, 0.00028646]]),
+       atol=1e-04)
 
 
 def test__hayashi_yoshida():
@@ -252,26 +255,14 @@ def test__hayashi_yoshida():
     b_values = series_b.fillna(0).values
     b_index = np.array(series_b.index, dtype='uint64')
 
-    hy = hf._hayashi_yoshida(a_index, b_index, a_values, b_values, step=1)
+    hy = hf._hayashi_yoshida(a_index, b_index, a_values, b_values, k=1)
     # print(hy)
-    assert np.allclose(hy, 0.0003578860312466325)
+    assert np.allclose(hy, 0.0003578860312466325, atol=1e-04)
 
 
 def test_hayashi_yoshida_preaveraged():
-    series_a = mock_prices.iloc[:, 0].dropna()
-    series_b = mock_prices.iloc[:, 1].dropna()
+    series_a = np.log(mock_prices.iloc[:, 0].dropna())
+    series_b = np.log(mock_prices.iloc[:, 1].dropna())
     hy = hf.hayashi_yoshida([series_a, series_b], theta=0.1)
-    print(hy)
-    assert np.allclose(hy[0, 1], 0.00023339)
-
-
-def test_epic():
-    tick_series_list = [mock_prices[c].dropna() for c in mock_prices.columns]
-    cov = hf.epic(tick_series_list)
-    # print(repr(cov))
-    assert np.allclose(cov, np.array([
-       [0.00036388, 0.00031981, 0.00041258, 0.00031885, 0.00037313],
-       [0.00031981, 0.00037954, 0.00032229, 0.000273  , 0.00033561],
-       [0.00041258, 0.00032229, 0.00042222, 0.00032687, 0.00036757],
-       [0.00031885, 0.000273  , 0.00032687, 0.00038167, 0.00031731],
-       [0.00037313, 0.00033561, 0.00036757, 0.00031731, 0.00042684]]))
+    # print(hy)
+    assert np.allclose(hy[0, 1], 0.00023339, atol=1e-04)

@@ -4,11 +4,13 @@ observed multivariate time series and observation noise cancelling. When
 possible, functions are parallelized and accelerated via JIT compilation
 with Numba. By default all cores of your machine are used. If your pipeline
 allows for parallelization on a higher level, it is preferable to do so. You
-may manually set the number of cores used by numba.set_num_threads(n).
+may manually set the number of cores used by setting ``numba.set_num_threads(n)``.
 Every estimator takes ``tick_series_list`` as the first argument.
-This is a list of pd.Series (one for each asset) containing tick prices with
-pandas.DatetimeIndex. The output is the integrated covariance matrix estimate
-as a 2d numpy.ndarray.
+This is a list of pd.Series (one for each asset) containing
+tick log-prices with pandas.DatetimeIndex. If you want to comute the covariance
+of residuals after predictions are subtracted from log-returnsjust cumsum
+the residuals. The output is the integrated covariance matrix
+estimate as a 2d numpy.ndarray.
 """
 
 import numpy as np
@@ -17,6 +19,34 @@ from hfhd import hd
 import numba
 from numba import prange
 import warnings
+
+
+def get_cumu_demeaned_resid(price, y_hat=None):
+    r"""
+    From a pd.Series of tick prices and predictions get a pd.Series of
+    tick log-prices with zero-mean returns, i.e. the reconstructed
+    log-prices from de-meaned log-return residuals. These log-prices are inputs
+    to the integrated covariance matrix estimators.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Tick prices of one asset with datetime index.
+    y_hat : pd.Series
+        The predictions.
+
+    Returns
+    -------
+    out : pd.Series
+        Log-prices corresponding to zero-mean returns.
+    """
+    y = np.log(price.dropna()).diff()
+    resid = y - y.mean()
+
+    if y_hat is not None:
+        resid -= y_hat - y_hat.mean()
+
+    return resid.cumsum()
 
 
 def refresh_time(tick_series_list):
@@ -29,7 +59,7 @@ def refresh_time(tick_series_list):
     Parameters
     ----------
     tick_series_list : list of pd.Series
-        Each pd.Series contains ticks of one asset with datetime index.
+        Each pd.Series contains tick prices of one asset with datetime index.
 
     Returns
     -------
@@ -409,7 +439,7 @@ def _get_indeces_and_values(tick_series_list):
     return indeces, values
 
 
-def msrc(tick_series_list, K=None, pairwise=True):
+def msrc(tick_series_list, M=None, N=None, pairwise=True):
     r"""
     The multi-scale realized volatility (MSRV) estimator of Zhang (2006).
     It is extended to multiple dimensions following Zhang (2011).
@@ -419,12 +449,17 @@ def msrc(tick_series_list, K=None, pairwise=True):
     Parameters
     ----------
     tick_series_list : list of pd.Series
-        Each pd.Series contains ticks of one asset with datetime index.
-        Must not contain nans.
-    K : numpy.ndarray
-        An array of sclales, default= ``None``.
-        If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
+        Each pd.Series contains tick-log-prices of one asset
+        with datetime index. Must not contain nans.
+    M : int, >=1, default=None
+        The number of scales
+        If ``M=None`` all scales :math:`i = 1, ..., M` are used, where M is
         chosen :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
+    N : int, >=0, default=None
+        The constant $N$ of Tao et. al (2013)
+        If ``N=None`` :math:`N = n^{1/2}`. Lam and Qian (2019) need
+        :math:`N = n^{2/3}` for non-sparse integrated covariance matrices,
+        in which case the rate of convergence reduces to $n^{1/6}$.
     pairwise : bool, default=True
         If ``True`` the estimator is applied to each pair individually. This
         increases the data efficiency but may result in an estimate that is
@@ -447,16 +482,19 @@ def msrc(tick_series_list, K=None, pairwise=True):
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-    >>> icov = msrc([series_a, series_b], K=np.array([1]), pairwise=False)
+    >>> # subtract mean return
+    >>> series_a = np.log(series_a)
+    >>> series_b = np.log(series_b)
+    >>> icov = msrc([series_a, series_b], M=1, pairwise=False)
     >>> icov_c = msrc([series_a, series_b])
     >>> # This is the biased, uncorrected integrated covariance matrix estimate.
-    >>> icov
-    array([[11.55288112,  0.45281646],
-           [ 0.45281646,  2.17269871]])
+    >>> np.round(icov, 3)
+    array([[11.553,  0.453],
+           [ 0.453,  2.173]])
     >>> # This is the unbiased,  corrected integrated covariance matrix estimate.
-    >>> icov_c
-    array([[0.90361064, 0.48705002],
-           [0.48705002, 0.98514774]])
+    >>> np.round(icov_c, 3)
+    array([[0.974, 0.408],
+           [0.408, 1.094]])
 
     Notes
     -----
@@ -523,20 +561,113 @@ def msrc(tick_series_list, K=None, pairwise=True):
     """
     if pairwise:
         indeces, values = _get_indeces_and_values(tick_series_list)
-        cov = _msrc_pairwise(indeces, values, K=K)
+        cov = _msrc_pairwise(indeces, values, M, N)
 
     else:
         data = refresh_time(tick_series_list)
         data = data.to_numpy().T
         if data.ndim == 1:
             data = data.reshape(1, -1)
-        cov = _msrc(data, K=K)
+        cov = _msrc(data, M, N)
 
     return cov
 
 
+# @numba.njit(fastmath=False, parallel=False)
+# def _msrc(data, K=None):
+#     r"""
+#     The inner function of :func:`~msrc`, not pairwise. The multi-scale realized
+#     volatility (MSRV) estimator of Zhang (2006). It is extended to multiple
+#     dimensions following Zhang (2011).
+
+#     Parameters
+#     ----------
+#     data : numpy.ndarray, >0, shape = (p, n)
+#         previous tick prices with dimensions p by n, where
+#         p = #assets, n = #number of refresh times, most recent tick on the
+#         right, must be synchronized (e.g. with :func:`~refresh_time`).
+#     K : numpy.ndarray, >=1
+#         An array of sclales, default= ``None``.
+#         If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
+#         chosen :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
+
+
+#     Returns
+#     -------
+#     out : numpy.ndarray
+#         The mrc estimate of the integrated covariance matrix.
+
+#     Examples
+#     --------
+
+#     >>> np.random.seed(0)
+#     >>> n = 200000
+#     >>> returns = np.random.multivariate_normal([0, 0], [[1,0.5],[0.5,1]], n)/n**0.5
+#     >>> prices = 100*np.exp(returns.cumsum(axis=0))
+#     >>> # add Gaussian microstructure noise
+#     >>> noise = 10*np.random.normal(0, 1, n*2).reshape(-1, 2)*np.sqrt(1/n**0.5)
+#     >>> prices +=noise
+#     >>> # sample n/2 (non-synchronous) observations of each tick series
+#     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
+#     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
+#     >>> pt = refresh_time([series_a, series_b])
+#     >>> icov = _msrc(pt.values.T, K=np.array([1]))
+#     >>> icov_c = _msrc(pt.values.T)
+#     >>> # This is the biased uncorrected integrated covariance matrix estimate.
+#     >>> icov
+#     array([[11.55288112,  0.45281646],
+#            [ 0.45281646,  2.17269871]])
+#     >>> # This is the unbiased corrected integrated covariance matrix estimate.
+#     >>> icov_c
+#     array([[0.89731589, 0.48705002],
+#            [0.48705002, 0.9801241 ]])
+#     >>> # In the univariate case we add an axis
+#     >>> univariate_ticks = series_a.values[:, None]
+#     >>> ivar_c = _msrc(univariate_ticks.T)
+#     >>> ivar_c
+#     array([[0.90361064]])
+#     """
+
+#     p, n = data.shape
+#     if K is None:
+#         # Opt M according to Eqn (34) of Zhang (2006)
+# #         M = int(np.ceil(0.5*n**(1/2)))
+#         M = int(np.ceil(1*n**(1/2)))
+#         K = np.arange(1, M+1)
+
+#     K_mean = np.mean(K)
+#     K_var = np.var(K)
+#     n_K = len(K)
+#     denom = n_K*K_var
+
+#     s = np.zeros((p, p))
+#     for k in K:
+#         sk = (data[:, k:] - data[:, :-k])
+#         sk = sk @ sk.T
+#         # optimal weights according to Eqn (18)
+#         if n_K > 1:
+#             a = (k-K_mean)/denom
+#         # if no bias correction
+#         else:
+#             a = 1.
+#         s += a * sk
+#     return s
+
 @numba.njit(fastmath=False, parallel=False)
-def _msrc(data, K=None):
+def _get_YY_m(Y, N, m):
+    Km = N + m
+    log_rets = Y[:, Km:] - Y[:, :-Km]
+
+    # de-mean
+    # numba doesn't support kwargs for np.mean
+    for i in range(log_rets.shape[0]):
+        log_rets[i, :] -= np.mean(log_rets[i, :])
+
+    return log_rets @ log_rets.T / Km
+
+
+@numba.njit(fastmath=False, parallel=False)
+def _msrc(data, M, N):
     r"""
     The inner function of :func:`~msrc`, not pairwise. The multi-scale realized
     volatility (MSRV) estimator of Zhang (2006). It is extended to multiple
@@ -548,11 +679,15 @@ def _msrc(data, K=None):
         previous tick prices with dimensions p by n, where
         p = #assets, n = #number of refresh times, most recent tick on the
         right, must be synchronized (e.g. with :func:`~refresh_time`).
-    K : numpy.ndarray, >=1
-        An array of sclales, default= ``None``.
-        If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
+    M : int, >=1
+        The number of scales.
+        If ``M=None`` all scales :math:`i = 1, ..., M` are used, where M is
         chosen :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
-
+    N : int, >=0
+        The constant $N$ of Tao et. al (2013)
+        If ``N=None`` :math:`N = n^{1/2}`. Lam and Qian (2019) need
+        :math:`N = n^{2/3}` for non-sparse integrated covariance matrices,
+        in which case the rate of convergence reduces to $n^{1/6}$.
 
     Returns
     -------
@@ -562,75 +697,67 @@ def _msrc(data, K=None):
     Examples
     --------
 
-    >>> np.random.seed(0)
-    >>> n = 200000
-    >>> returns = np.random.multivariate_normal([0, 0], [[1,0.5],[0.5,1]], n)/n**0.5
-    >>> prices = 100*np.exp(returns.cumsum(axis=0))
-    >>> # add Gaussian microstructure noise
-    >>> noise = 10*np.random.normal(0, 1, n*2).reshape(-1, 2)*np.sqrt(1/n**0.5)
-    >>> prices +=noise
-    >>> # sample n/2 (non-synchronous) observations of each tick series
-    >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
-    >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-    >>> pt = refresh_time([series_a, series_b])
-    >>> icov = _msrc(pt.values.T, K=np.array([1]))
-    >>> icov_c = _msrc(pt.values.T)
-    >>> # This is the biased uncorrected integrated covariance matrix estimate.
-    >>> icov
-    array([[11.55288112,  0.45281646],
-           [ 0.45281646,  2.17269871]])
-    >>> # This is the unbiased corrected integrated covariance matrix estimate.
-    >>> icov_c
-    array([[0.89731589, 0.48705002],
-           [0.48705002, 0.9801241 ]])
-    >>> # In the univariate case we add an axis
-    >>> univariate_ticks = series_a.values[:, None]
-    >>> ivar_c = _msrc(univariate_ticks.T)
-    >>> ivar_c
-    array([[0.90361064]])
+    # >>> np.random.seed(0)
+    # >>> n = 200000
+    # >>> returns = np.random.multivariate_normal([0, 0], [[1,0.5],[0.5,1]], n)/n**0.5
+    # >>> prices = 100*np.exp(returns.cumsum(axis=0))
+    # >>> # add Gaussian microstructure noise
+    # >>> noise = 10*np.random.normal(0, 1, n*2).reshape(-1, 2)*np.sqrt(1/n**0.5)
+    # >>> prices +=noise
+    # >>> # sample n/2 (non-synchronous) observations of each tick series
+    # >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
+    # >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
+    # >>> pt = refresh_time([series_a, series_b])
+    # >>> icov = _msrc(pt.values.T, K=np.array([1]))
+    # >>> icov_c = _msrc(pt.values.T)
+    # >>> # This is the biased uncorrected integrated covariance matrix estimate.
+    # >>> icov
+    # array([[11.55288112,  0.45281646],
+    #        [ 0.45281646,  2.17269871]])
+    # >>> # This is the unbiased corrected integrated covariance matrix estimate.
+    # >>> icov_c
+    # array([[0.89731589, 0.48705002],
+    #        [0.48705002, 0.9801241 ]])
+    # >>> # In the univariate case we add an axis
+    # >>> univariate_ticks = series_a.values[:, None]
+    # >>> ivar_c = _msrc(univariate_ticks.T)
+    # >>> ivar_c
+    # array([[0.90361064]])
     """
 
     p, n = data.shape
-    if K is None:
+
+    if M is None:
         # Opt M according to Eqn (34) of Zhang (2006)
-        M = int(np.ceil(0.5*n**(1/2)))
-        K = np.arange(1, M+1)
+        M = int(np.ceil(n**(1/2)))
 
-    K_mean = np.mean(K)
-    K_var = np.var(K)
-    n_K = len(K)
-    denom = n_K*K_var
-    data = np.log(data)
+    if N is None:
+        # N according to Fan and Wang (2007)
+        N = int(np.ceil(n**(1/2)))
+        # N according to Lam and Wang (2019)
+        # N = int(np.ceil(n**(2/3)))
 
-    # if multivariate
-    if p > 1:
-        s = np.zeros((p, p))
-        for k in K:
-            # use np.cov since it is faster than matrix mult
-            sk = np.cov(data[:, k:] - data[:, :-k])
+    s = np.zeros((p, p))
+
+    if M > 1:
+        for m in range(1, M+1):
             # optimal weights according to Eqn (18)
-            if n_K > 1:
-                a = (k-K_mean)/denom
-            # if no bias correction
-            else:
-                a = 1.
-            s += a * sk
-    # if univariate
-    else:
-        s = np.array([[0.]])
-        for k in K:
-            sk = np.array([[np.var(data[:, k:] - data[:, :-k])]])
-            if n_K > 1:
-                a = ((k-K_mean)/denom)
-            else:
-                a = 1.
-            s += a * sk
+            a = 12*(m + N)*(m - M/2 - 1/2) / (M*(M**2 - 1))
+            YY_m = _get_YY_m(data, N, m)
+            s += a * YY_m
 
-    return n*s
+        zeta = (M + N)*(N + 1)/((n + 1)*(M - 1))
+        YY_K1 = _get_YY_m(data, N, 1)
+        YY_KM = _get_YY_m(data, N, M)
+        s += zeta * (YY_K1 - YY_KM)
+    else:
+        s += _get_YY_m(data, 0, 1)
+
+    return s
 
 
 @numba.njit(cache=False, parallel=True)
-def _msrc_pairwise(indeces, values, K=None):
+def _msrc_pairwise(indeces, values, M=None, N=None):
     """
     Accelerated inner function of pairwise :func:`msrc`.
 
@@ -640,7 +767,7 @@ def _msrc_pairwise(indeces, values, K=None):
         The length is equal to the number of assets. Each 'row' contains
         the unix time of ticks of one asset.
     values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
-        Each 'row' contains the prices of ticks of one asset.
+        Each 'row' contains the log-prices of ticks of one asset.
     K : numpy.ndarray
         An array of sclales.
 
@@ -669,7 +796,7 @@ def _msrc_pairwise(indeces, values, K=None):
         n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
 
         if i == j:
-            cov[i, i] = _msrc(values[i, :n_not_nans_i].reshape(1, -1), K)[0, 0]
+            cov[i, i] = _msrc(values[i, :n_not_nans_i].reshape(1, -1), M, N)[0, 0]
         else:
             merged_values, _ = _refresh_time(
                 (indeces[i, :n_not_nans_i],
@@ -682,7 +809,7 @@ def _msrc_pairwise(indeces, values, K=None):
             merged_values = merged_values[~np.isnan(merged_values)]
             merged_values = merged_values.reshape(-1, 2)
 
-            cov[i, j] = _msrc(merged_values.T, K)[0, 1]
+            cov[i, j] = _msrc(merged_values.T, M, N)[0, 1]
             cov[j, i] = cov[i, j]
 
     return cov
@@ -698,7 +825,8 @@ def tsrc(tick_series_list, J=1, K=None):
     Parameters
     ----------
     tick_series_list : list of pd.Series
-        Each pd.Series contains ticks of one asset with datetime index.
+        Each pd.Series contains tick-log-prices of one asset
+        with datetime index.
     K : int, default = ``int(n**(2/3))``
         long scale, default = ``int(n**(2/3))`` as per Zhang (2005)
     J : int, default = 1
@@ -721,11 +849,14 @@ def tsrc(tick_series_list, J=1, K=None):
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
+    >>> # take logs and subtract mean return
+    >>> series_a = np.log(series_a)
+    >>> series_b = np.log(series_b)
     >>> icov_c = tsrc([series_a, series_b])
     >>> # This is the unbiased,  corrected integrated covariance matrix estimate.
-    >>> icov_c
-    array([[0.9649066 , 0.39741674],
-           [0.39741674, 0.93345289]])
+    >>> np.round(icov_c, 3)
+    array([[0.995, 0.361],
+           [0.361, 0.977]])
 
     Notes
     -----
@@ -789,18 +920,17 @@ def tsrc(tick_series_list, J=1, K=None):
 
     """
     data = refresh_time(tick_series_list)
+    data -= data.mean(axis=0)
     M = data.shape[0]
 
     if K is None:
         K = int(M ** (2 / 3))
 
-    sk = (np.log(data) - np.log(data).shift(K)).dropna()
-    sk = sk - sk.mean(axis=0)
+    sk = (data - data.shift(K)).dropna()
     sk = sk.transpose().dot(sk)
     sk = 1 / K * sk
 
-    sj = (np.log(data) - np.log(data).shift(J)).dropna()
-    sj = sj - sj.mean(axis=0)
+    sj = (data - data.shift(J)).dropna()
     sj = sj.transpose().dot(sj)
     sj = 1 / J * sj
 
@@ -827,25 +957,26 @@ def _numba_minimum(x):
     return np.minimum(x, 1-x)
 
 
-def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True):
+def mrc(tick_series_list, theta=None, g=None, bias_correction=True,
+        pairwise=True, k=None):
     r"""
     The modulated realised covariance (MRC) estimator of
     Christensen et al. (2010).
 
     Parameters
     ----------
-    data : pd.Series or pd.Dataframe
-        A  pd.Series of univariate log_returns
-        or a pd.DataFrame of synchronized multivariate log-returns
-        (e.g. with :func:`~refresh_time`).
-    theta : float, optional, default=0.4
+    tick_series_list : list of pd.Series
+        Each pd.Series contains tick-log-prices of one asset
+        with datetime index.
+    theta : float, optional, default=None
         Theta is used to determine the preaveraging window ``k``.
         If ``bias_correction`` is True (see below)
         then :math:`k = \theta \sqrt{n}`,
         else :math:`k = \theta n^{1/2+ 0.1}`.
         Hautsch & Podolskij (2013) recommend 0.4 for liquid assets
         and 0.6 for less liquid assets. If ``theta=0``, the estimator reduces
-        to the standard realized covariance estimator.
+        to the standard realized covariance estimator. If ``theta=None`` and
+        ``k`` is not specified explicitly, the suggested theta of 0.4 is used.
     g : function, optional, default = ``None``
         A vectorized weighting function.
         If ``g = None``, :math:`g=min(x, 1-x)`
@@ -858,6 +989,10 @@ def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True
         If ``True`` the estimator is applied to each pair individually. This
         increases the data efficiency but may result in an estimate that is
         not p.s.d.
+    k : int, optional, default=None
+        The bandwidth parameter with which to preaverage. Alternative to theta.
+        Useful for non-parametric eigenvalue regularization based on sample
+        spliting.
 
     Returns
     -------
@@ -878,21 +1013,23 @@ def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
+    >>> # take logs and subtract mean return
+    >>> series_a = np.log(series_a)
+    >>> series_b = np.log(series_b)
     >>> icov_c = mrc([series_a, series_b], pairwise=False)
     >>> # This is the unbiased, corrected integrated covariance matrix estimate.
-    >>> icov_c
-    array([[0.82793973, 0.4066328 ],
-           [0.4066328 , 0.89545898]])
+    >>> np.round(icov_c, 3)
+    array([[0.827, 0.407],
+           [0.407, 0.895]])
     >>> # This is the unbiased, corrected realized variance estimate.
     >>> ivar_c = mrc([series_a], pairwise=False)
-    >>> ivar_c
-    array([[0.84992681]])
-    >>>
+    >>> np.round(ivar_c, 3)
+    array([[0.85]])
     >>> # Use ticks more efficiently by pairwise estimation
     >>> icov_c = mrc([series_a, series_b], pairwise=True)
-    >>> icov_c
-    array([[0.84992681, 0.4066328 ],
-           [0.4066328 , 0.88393458]])
+    >>> np.round(icov_c, 3)
+    array([[0.85 , 0.407],
+           [0.407, 0.884]])
 
     Notes
     -----
@@ -993,22 +1130,22 @@ def mrc(tick_series_list, theta=0.4, g=None, bias_correction=True, pairwise=True
 
     if pairwise and p > 1:
         indeces, values = _get_indeces_and_values(tick_series_list)
-        cov = _mrc_pairwise(indeces, values, theta, g, bias_correction)
+        cov = _mrc_pairwise(indeces, values, theta, g, bias_correction, k)
     else:
         if p > 1:
             data = refresh_time(tick_series_list).dropna()
-            data = np.diff(np.log(data.to_numpy()), axis=0)
+            data = np.diff(data.to_numpy(), axis=0)
         else:
             data = tick_series_list[0]
-            data = np.diff(np.log(data.to_numpy()), axis=0)[:, None]
+            data = np.diff(data.to_numpy(), axis=0)[:, None]
 
-        cov = _mrc(data, theta, g, bias_correction)
+        cov = _mrc(data, theta, g, bias_correction, k)
 
     return cov
 
 
 @numba.njit(cache=False, fastmath=False, parallel=False)
-def _mrc(data, theta, g, bias_correction):
+def _mrc(data, theta, g, bias_correction, k):
     r"""
     The modulated realised covariance (MRC) estimator of
     Christensen et al. (2010).
@@ -1031,31 +1168,47 @@ def _mrc(data, theta, g, bias_correction):
         A vectorized weighting function.`
     bias_correction : boolean
         If ``True``, then the estimator is optimized for convergence
-        rate but it might not be p.s.d. Alternatively as described in
-        Christensen et al. (2010) it can be ommited. Then k should be chosen
+        rate but it might not be p.s.d. Alternatively, as described in
+        Christensen et al. (2010), it can be ommited. Then k should be chosen
         larger than otherwise optimal.
+    k : int
+        The bandwidth parameter with which to preaverage. Alternative to theta.
+        Useful for non-parametric eigenvalue regularization based on sample
+        spliting.
 
     Returns
     -------
     mrc : numpy.ndarray
         The mrc estimate of the integrated covariance.
     """
-    if data.ndim == 1:
-        data = data.reshape(-1, 1)
+
     n, p = data.shape
 
-    if theta > 0:
+    # de-mean
+    # numba doesn't support kwargs for np.mean
+    for i in range(p):
+        data[:, i] -= np.mean(data[:, i])
 
+    # get the bandwidth
+    if k is not None and theta is not None:
+        raise ValueError("Either ``theta`` or ``k`` can be specified,"
+                         " but not both! One of them must be ``None``.")
+    if k is None:
+        if theta is None:
+            theta = 0.4
+        k = _get_k(n, theta, bias_correction)
+
+    if theta is None:
         if bias_correction:
-            k = np.ceil(np.sqrt(data.shape[0])*theta)
-            psi2 = np.sum(g(np.arange(1, k)/k)**2)/k
-            psi1 = np.sum((g(np.arange(1, k)/k)-g((np.arange(1, k)-1)/k))**2)*k
-
+            theta = k / np.sqrt(n)
         else:
-            delta = 0.1
-            k = np.ceil(np.power(data.shape[0], 0.5+delta)*theta)
-            psi2 = np.sum(g(np.arange(1, k)/k)**2)/k
-            psi1 = np.sum((g(np.arange(1, k)/k)-g((np.arange(1, k)-1)/k))**2)*k
+            theta = k / np.power(n, 0.6)
+
+    # If theta is greater than zero comute the preaveraging estimator,
+    # otherwise the estimator is just the realized covariance matrix.
+    if theta > 0:
+        psi2 = np.sum(g(np.arange(1, k)/k)**2)/k
+        psi1 = np.sum((g(np.arange(1, k)/k)-g((np.arange(1, k)-1)/k))**2)*k
 
         weight = g(np.arange(1, k)/k)
         data_pa = _preaverage(data, weight)
@@ -1064,19 +1217,23 @@ def _mrc(data, theta, g, bias_correction):
         data_pa = data_pa[~np.isnan(data_pa)]
         data_pa = data_pa.reshape(-1, p)
 
-        mrc = __mrc(data_pa, data,
-                    theta, k, psi1, psi2, bias_correction)
+        # The biass correction term, bc, needs to be initialized as array to
+        # have a consistent type for numba.
+        bc = np.zeros((p, p))
+
+        if bias_correction:
+            bc += psi1 / (theta ** 2 * psi2) * data.T @ data / n / 2
+
+        finite_sample_correction = n / (n - k + 2)
+        mrc = finite_sample_correction / (psi2 * k) * data_pa.T @ data_pa - bc
     else:
-        if p > 1:
-            mrc = np.cov(data.T) * n
-        else:
-            mrc = np.array([[np.var(data) * n]])
+        mrc = data.T @ data
 
     return mrc
 
 
 @numba.njit(cache=False, parallel=True, fastmath=False)
-def _mrc_pairwise(indeces, values, theta, g, bias_correction):
+def _mrc_pairwise(indeces, values, theta, g, bias_correction, k):
     r"""
     Accelerated inner function of pairwise :func:`~mrc`.
 
@@ -1086,7 +1243,7 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
         The length is equal to the number of assets. Each 'row' contains
         the unix time of ticks of one asset.
     values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
-        Each 'row' contains the prices of ticks of one asset.
+        Each 'row' contains the log-prices of ticks of one asset.
     theta : float, optional, default=0.4
         theta is used to determine the preaveraging window ``k``.
         If ``bias_correction`` is True (see below)
@@ -1102,6 +1259,10 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
         rate but it might not be p.s.d. Alternatively as described in
         Christensen et al. (2010) it can be ommited. Then k should be chosen
         larger than otherwise optimal.
+    k : int
+        The bandwidth parameter with which to preaverage. Alternative to theta.
+        Useful for non-parametric eigenvalue regularization based on sample
+        spliting.
 
     Returns
     -------
@@ -1129,9 +1290,9 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
         n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
 
         if i == j:
-            data = np.log(values[i, :n_not_nans_i]).reshape(-1, 1)
+            data = values[i, :n_not_nans_i].reshape(-1, 1)
             data = data[1:, :] - data[:-1, :]
-            cov[i, i] = _mrc(data, theta, g, bias_correction)[0, 0]
+            cov[i, i] = _mrc(data, theta, g, bias_correction, k)[0, 0]
         else:
             merged_values, _ = _refresh_time((indeces[i, :n_not_nans_i],
                                              indeces[j, :n_not_nans_j]),
@@ -1141,93 +1302,349 @@ def _mrc_pairwise(indeces, values, theta, g, bias_correction):
             # numba doesn't support boolean indexing of 2d array
             merged_values = merged_values.flatten()
             merged_values = merged_values[~np.isnan(merged_values)]
-            merged_values = merged_values.reshape(-1, 2)
-            data = np.log(merged_values)
+            data = merged_values.reshape(-1, 2)
             data = data[1:, :] - data[:-1, :]
 
-            cov[i, j] = _mrc(data, theta, g, bias_correction)[0, 1]
+            cov[i, j] = _mrc(data, theta, g, bias_correction, k)[0, 1]
             cov[j, i] = cov[i, j]
 
     return cov
 
 
-@numba.njit(cache=False, fastmath=False, parallel=False)
-def __mrc(data_pa, data, theta, k, psi1, psi2, bias_correction):
-    r"""
-    The modulated realised covariance (MRC) estimator of
-    Christensen et al. (2010).
+@numba.njit
+def _get_k(n, theta, bias_correction):
+    """ Get the optimal bandwidth for preaveraging depending on the sample
+    size and whether or not to correct for the bias.
+    """
+    if theta > 0:
+        if bias_correction:
+            k = np.ceil(np.sqrt(n)*theta)
+        else:
+            delta = 0.1
+            k = np.ceil(np.power(n, 0.5+delta)*theta)
+    else:
+        k = 1
+
+    return int(k)
+
+
+@numba.njit
+def parzen_kernel(x):
+    """
+    The Parzen weighting function used in the Kernel Realized Volatility
+    Matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et. al (2011).
 
     Parameters
     ----------
-    data_pa : numpy.ndarray, shape = (n, p)
-        The preaveraged log-returns.
-    data : numpy.ndarray, shape = (n, p)
-        The original log-returns.
-    theta : float, optional, default=0.4
-        theta is used to determine the preaveraging window ``k``.
-        If ``bias_correction`` is True (see below)
-        then :math:`k = \theta \sqrt{n}`,
-        else :math:`k = \theta n^{1/2+ 0.1}`.
-        Hautsch & Podolskij (2013) recommend 0.4 for liquid assets
-        and 0.6 for less liquid assets. If ``theta=0``, the estimator reduces
-        to the standard realized covariance estimator.
-    k : int
-        The preaveraging lookback.
-    psi1 : float
-        $Psi_1$ of Christensen et al. (2010).
-    psi2 : float
-        $Psi_2$ of Christensen et al. (2010).
-    bias_correction : boolean
-        If ``True``, then the estimator is optimized for convergence
-        rate but it might not be p.s.d. Alternatively as described in
-        Christensen et al. (2010) it can be ommited. Then k should be chosen
-        larger than otherwise optimal.
+    x : float
 
     Returns
     -------
-    mrc : numpy.ndarray, 2d
-        The integrated covariance matrix estimate using the MRC estimator.
+    y : float
+        The weight.
+
+    References
+    ----------
+    Barndorff-Nielsen, O. E., Hansen, P. R., Lunde, A. and Shephard, N. (2011).
+    Multivariate realised kernels: consistent positive semi-definite estimators
+    of the covariation of equity prices with noise and non-synchronous trading,
+    Journal of Econometrics 162(2): 149– 169.
+    """
+    if x < 0:
+        raise ValueError("x must be >= 0.")
+    elif x <= 1/2:
+        y = 1 - 6 * x**2 + 6 * x**3
+    elif x <= 1:
+        y = 2 * (1 - x)**3
+    else:
+        y = 0
+    return y
+
+
+@numba.njit
+def quadratic_spectral_kernel(x):
+    """
+    The Quadratic Spectral weighting function used in the Kernel Realized
+    Volatility Matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et.
+    al (2011).
+
+    Parameters
+    ----------
+    x : float
+
+    Returns
+    -------
+    y : float
+        The weight.
+
+    References
+    ----------
+    Barndorff-Nielsen, O. E., Hansen, P. R., Lunde, A. and Shephard, N. (2011).
+    Multivariate realised kernels: consistent positive semi-definite estimators
+    of the covariation of equity prices with noise and non-synchronous trading,
+    Journal of Econometrics 162(2): 149– 169.
+    """
+    if x < 0:
+        raise ValueError("x must be >= 0.")
+    elif x == 0:
+        y = 1
+    else:
+        y = 3 / (x**2) * (np.sin(x) / x - np.cos(x))
+    return y
+
+
+def get_bandwidth(n, var_ret, var_noise, kernel):
+    """
+    Compute the optimal bandwidth parameter $H$ for :func:`~krvm` according to
+    Barndorff-Nielsen et. al (2011).
+
+    Parameters
+    ----------
+    n : int >0
+        The sample size.
+    var_ret : float > 0
+        The variance of the efficient return process.
+    var_noise :float >=0
+        The variance of the noise process.
+
+    Returns
+    -------
+    H : int
+        The bandwidth parameter.
+
+    References
+    ----------
+    Barndorff-Nielsen, O. E., Hansen, P. R., Lunde, A. and Shephard, N. (2011).
+    Multivariate realised kernels: consistent positive semi-definite estimators
+    of the covariation of equity prices with noise and non-synchronous trading,
+    Journal of Econometrics 162(2): 149– 169.
+    """
+
+    if kernel == 'parzen':
+        # Parzen kernel c_star according to Table 1 of
+        # Barndorff-Nielsen et. al (2011).
+        c_star = 3.51
+
+    elif kernel == 'quadratic_spectral':
+        # Quadratic Spectral c_star according to Table 1 of
+        # Barndorff-Nielsen et. al (2011).
+        c_star = 0.46
+    else:
+        raise ValueError("Specified kernel not implemented.")
+
+    xi_sq = var_noise / var_ret
+    H = int(c_star * xi_sq**(2/5) * n**(3/5))
+    return H
+
+
+@numba.njit
+def gamma(data, h):
+    r"""
+    The h-th realized autocovariance.
+
+    Parameters
+    ----------
+    data : numpy.ndarray, shape = (p, n)
+        An array of synchronized and demeaned log_returns.
+        (e.g. with :func:`~refresh_time`).
+    h : int
+        The order of the autocovariance.
+
+    Returns
+    -------
+    gamma_h : numpy.ndarray, shape = (p, p)
+        The h-th realized autocovariance matrix.
+
+    Notes
+    -----
+    The h-th realized autocovariance is given by
+    \begin{equation}
+    \boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}\right)=
+    \sum_{s=h+2}^{n+1}\left(\mathbf{Y}(s)-\mathbf{Y}(s-1)\right)
+    \left(\mathbf{Y}(s-h)-\mathbf{Y}(s-h-1)\right)^{\prime}, \quad h \geq 0
+    \end{equation}
+    and
+    \begin{equation}
+    \boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}\right)=
+    \boldsymbol{\gamma}^{(-h)}\left(\mathbf{Y}\right)^{\prime}, \quad h < 0,
+    \end{equation}
+    where $\mathbf{Y}$ denotes the synchronized zero-mean log-price.
+    """
+    if h == 0:
+        gamma_h = data @ data.T
+    else:
+        gamma_h = data[:, abs(h):] @ data[:, :-abs(h)].T
+
+    if h < 0:
+        gamma_h = gamma_h.T
+
+    return gamma_h
+
+
+@numba.njit(cache=False, parallel=False, fastmath=False)
+def _krvm(data, H, kernel):
+    """
+    Parameters
+    ----------
+    data : numpy.ndarray, shape = (p, n)
+        An array of (jittered), synchronized and log_returns.
+        (e.g. with :func:`~refresh_time`).
+    H : int, > 0
+        The bandwidth parameter for the Parzen kernel.
+        Should be on the order of $n^{3/5}$.
+    kernel : function
+        The kernel weighting function.
+
+    Returns
+    -------
+    cov : numpy.ndarray, 2d
+        The integrated covariance matrix estimate.
+
+    References
+    ----------
+    Barndorff-Nielsen, O. E., Hansen, P. R., Lunde, A. and Shephard, N. (2011).
+    Multivariate realised kernels: consistent positive semi-definite estimators
+    of the covariation of equity prices with noise and non-synchronous trading,
+    Journal of Econometrics 162(2): 149– 169."""
+
+    p, n = data.shape
+
+    # de-mean
+    # numba doesn't support kwargs for np.mean
+    for i in range(p):
+        data[i, :] -= np.mean(data[i, :])
+
+    # if p.s.d estimator: c=0, else: c=1, since pairwise estimation and
+    # subsequent shrinkage is advocated anyway, hard-code to 1.
+    c = 1
+    cov = gamma(data, 0)
+    for h in range(1, n+1):
+        weight = kernel((h-c) / H)
+
+        # The Parzen kernel, for example, needs to compute only
+        # H gammas after that the weight stays 0, hence early stop.
+        if weight == 0:
+            return cov
+
+        g = gamma(data, h)
+        cov += weight * (g + g.T)
+
+    return cov
+
+
+@numba.njit(cache=False, parallel=True, fastmath=False)
+def _krvm_pairwise(indeces, values, H, kernel):
+    r"""
+    Accelerated inner function of pairwise :func:`~krvm`.
+
+    Parameters
+    ----------
+    indeces : numpy.ndarray, shape(p, n_max), dtype='uint64'
+        The length is equal to the number of assets. Each 'row' contains
+        the unix time of ticks of one asset.
+    values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
+        Each 'row' contains the log-prices of ticks of one asset.
+    H : int, > 0
+        The bandwidth parameter for the Parzen kernel.
+        Should be on the order of $n^{3/5}$.
+    kernel : function
+        The kernel weighting function.
+
+    Returns
+    -------
+    cov : numpy.ndarray, 2d
+        The integrated covariance matrix using the pairwise synchronized data.
 
 
     """
+    p = indeces.shape[0]
+    cov = np.ones((p, p))
 
-    if not data_pa.ndim == 2:
-        raise ValueError("data_pa must be 2d array.")
+    # don't loop over ranges but get all indeces in advance
+    # to improve parallelization.
+    idx = _upper_triangular_indeces(p)
 
-    if not data.ndim == 2:
-        raise ValueError("data must be 2d array.")
+    for t in prange(len(idx)):
+        i, j = idx[t, :]
 
-    n, p = data_pa.shape
-    # bc needs to be initialized as array to have a consistent type for numba
-    bc = np.zeros((p, p))
+        # get the number of no nan values for asset i and j.
+        # This is needed since nan is not defined
+        # for int64, which are in the indeces. Hence, I use the fact that
+        # values and indeces have the same shape and nans are only at the
+        # end of an array.
+        n_not_nans_i = values[i][~np.isnan(values[i])].shape[0]
+        n_not_nans_j = values[i][~np.isnan(values[j])].shape[0]
 
-    if theta > 0:
-
-        if bias_correction:
-            if p > 1:
-                bc = psi1 / (theta ** 2 * psi2) * np.cov(data.T) / 2
-            else:
-                # numba doesn't like np.cov of 1d array
-                bc[:, :] = psi1 / (theta ** 2 * psi2) * np.var(data) / 2
-
-        finite_sample_correction = n / (n - k + 2)
-
-        if p > 1:
-            mrc = finite_sample_correction/(psi2*k)*np.cov(data_pa.T)*n - bc
+        if i == j:
+            data = values[i, :n_not_nans_i].reshape(-1, 1)
+            data = data[1:, :] - data[:-1, :]
+            cov[i, i] = _krvm(data.T, H, kernel)[0, 0]
         else:
-            mrc = finite_sample_correction/(psi2*k)*np.var(data_pa)*n - bc[0, 0]
-            mrc = np.array([[mrc]])
+            merged_values, _ = _refresh_time((indeces[i, :n_not_nans_i],
+                                             indeces[j, :n_not_nans_j]),
+                                             (values[i, :n_not_nans_i],
+                                              values[j, :n_not_nans_j]))
 
+            # numba doesn't support boolean indexing of 2d array
+            merged_values = merged_values.flatten()
+            merged_values = merged_values[~np.isnan(merged_values)]
+            data = merged_values.reshape(-1, 2)
+            data = data[1:, :] - data[:-1, :]
+
+            cov[i, j] = _krvm(data.T, H, kernel)[0, 1]
+            cov[j, i] = cov[i, j]
+
+    return cov
+
+
+def krvm(tick_series_list, H, pairwise=True, kernel=quadratic_spectral_kernel):
+    """
+    Parameters
+    ----------
+    tick_series_list : list of pd.Series
+        Each pd.Series contains tick-log-prices of one asset
+        with datetime index.
+    H : int, > 0
+        The bandwidth parameter for the Parzen kernel.
+        Should be on the order of $n^{3/5}$.
+    pairwise : bool, default=True
+        If ``True`` the estimator is applied to each pair individually. This
+        increases the data efficiency but may result in an estimate that is
+        not p.s.d even for the p.s.d version of thiss estimator.
+    kernel : function, default=quadratic_spectral_kernel
+        The kernel weighting function.
+
+    Returns
+    -------
+    cov : numpy.ndarray
+        The intgrated covariance matrix estimate.
+
+    References
+    ----------
+    Barndorff-Nielsen, O. E., Hansen, P. R., Lunde, A. and Shephard, N. (2011).
+    Multivariate realised kernels: consistent positive semi-definite estimators
+    of the covariation of equity prices with noise and non-synchronous trading,
+    Journal of Econometrics 162(2): 149– 169."""
+
+    p = len(tick_series_list)
+
+    if pairwise and p > 1:
+        indeces, values = _get_indeces_and_values(tick_series_list)
+        cov = _krvm_pairwise(indeces, values, H, kernel)
     else:
         if p > 1:
-            mrc = np.cov(data_pa.T)*n
+            data = refresh_time(tick_series_list).dropna()
+            data = np.diff(data.to_numpy(), axis=0)
         else:
-            mrc = np.array([[np.var(data_pa)*n]])
+            data = tick_series_list[0]
+            data = np.diff(data.to_numpy(), axis=0)[:, None]
 
-    return mrc
+        cov = _krvm(data.T, H, kernel)
+
+    return cov
 
 
-def hayashi_yoshida(tick_series_list, theta=0):
+def hayashi_yoshida(tick_series_list, theta=None, k=None):
     r"""
     The (pairwise) Hayashi-Yoshida estimator of Hayashi and Yoshida (2005).
     This estimtor sums up all products of time-overlapping returns
@@ -1243,13 +1660,21 @@ def hayashi_yoshida(tick_series_list, theta=0):
     Parameters
     ----------
     tick_series_list : list of pd.Series
-        Each pd.Series contains ticks of one asset with datetime index.
-    theta : float, theta>=0, default=0
+        Each pd.Series contains tick-log-prices of one asset
+        with datetime index.
+    theta : float, theta>=0, default=None
+        If ``theta=None`` and ``k`` is not specified explicitly,
+        theta will be set to 0.
         If theta>0, the log-returns are preaveraged with theta and
         :math:`g(x) = min(x, 1-x)`. Hautsch and Podolskij (2013) suggest
         values between 0.4 (for liquid stocks) and 0.6 (for less
         liquid stocks).
-        If theta = 0, this is the standard HY estimator.
+        If ``theta=0``, this is the standard HY estimator.
+    k : int, >=1, default=None
+        The bandwidth parameter with which to preaverage. Alternative to
+        ``theta``. Useful for non-parametric eigenvalue regularization based
+        on sample splitting. When ``k=None`` and ``theta=None``, ``k`` will
+        be set to 1. If ``k=1``, this is the standard HY estimator.
 
     Returns
     -------
@@ -1409,27 +1834,29 @@ def hayashi_yoshida(tick_series_list, theta=0):
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
+    >>> # take logs and subtract mean return
+    >>> series_a = np.log(series_a)
+    >>> series_b = np.log(series_b)
     >>> icov = hayashi_yoshida([series_a, series_b])
-    >>> np.round(icov, 4)
-    array([[0.9826, 0.5117],
-           [0.5117, 0.9899]])
+    >>> np.round(icov, 3)
+    array([[0.983, 0.512],
+           [0.512, 0.99 ]])
     """
     indeces, values = _get_indeces_and_values(tick_series_list)
     p = indeces.shape[0]
 
     # get log-returns
-    values = np.log(values)
     values = np.diff(values, axis=1)
     # do not drop first nan which results from diff since its index
     # is used to determine first interval. Instead put column of zeros.
     values = np.column_stack((np.zeros(p), values))
 
-    cov = _hayashi_yoshida_pairwise(indeces, values, theta)
+    cov = _hayashi_yoshida_pairwise(indeces, values, theta, k)
     return cov
 
 
 @numba.njit(cache=False, parallel=True, fastmath=False)
-def _hayashi_yoshida_pairwise(indeces, values, theta):
+def _hayashi_yoshida_pairwise(indeces, values, theta, k):
     r"""
     The pairwise computation of the integrated covariance matrix
     in :func:`~hayashi_yoshida` using :func:`~_hayashi_yoshida` is
@@ -1441,18 +1868,26 @@ def _hayashi_yoshida_pairwise(indeces, values, theta):
         The length is equal to the number of assets. Each 'row' contains
         the unix time of ticks of one asset.
     values : numpy.ndarray, shape(p, n_max), dtype='float64'>0
-        Each 'row' contains the tick-log-returns of one asset.
-    theta : float, theta>=0, default=0
+        Each 'row' contains the log-tick-returns of one asset.
+    theta : float, theta>=0
+        If ``theta=None`` and ``k`` is not specified explicitly,
+        theta will be set to 0.
         If theta>0, the log-returns are preaveraged with theta and
-        :math:`g(x) = min(x, 1-x)`. Christensen et al. (2013) use
-        ``theta=0.15``.
-        If theta = 0, this is the standard HY estimator.
+        :math:`g(x) = min(x, 1-x)`. Hautsch and Podolskij (2013) suggest
+        values between 0.4 (for liquid stocks) and 0.6 (for less
+        liquid stocks).
+        If ``theta=0``, this is the standard HY estimator.
+    k : int, >=1
+        The bandwidth parameter with which to preaverage. Alternative to
+        ``theta``. Useful for non-parametric eigenvalue regularization based
+        on sample splitting.
 
     Returns
     -------
     cov : numpy.ndarray
         The pairwise HY estimate of the integrated covariance matrix.
     """
+
     p = indeces.shape[0]
     cov = np.zeros((p, p))
 
@@ -1483,35 +1918,16 @@ def _hayashi_yoshida_pairwise(indeces, values, theta):
             a_values = values[j, :n_not_nans_j]
             a_index = indeces[j, :n_not_nans_j]
 
-        if theta > 0:
-            # set k as recommended in Christensen et al. (2010)
-            k = int(np.ceil(np.power((a_values.shape[0]
-                                     + b_values.shape[0]),
-                                     0.5) * theta))
-            weight = _numba_minimum(np.arange(1, k)/k)
-
-            if k > 1:
-                # Preaverage
-                a_values = _preaverage(a_values.reshape(-1, 1), weight).flatten()
-                # and adjust acc. to Eqn (27) of Christensen et al. (2010).
-                # psi_HY = np.sum(g(np.arange(1, k)/k))/k = 1/4 for weight
-                # function chosen as def g(x): return np.minimum(x, 1-x)
-                a_values /= (k / 4)
-                b_values = _preaverage(b_values.reshape(-1, 1), weight).flatten()
-                b_values /= (k / 4)
-
-        else:
-            k = 1
-
-        hy = _hayashi_yoshida(a_index[k-1:], b_index[k-1:],
-                              a_values[k-1:], b_values[k-1:], k)
+        hy = _hayashi_yoshida(a_index, b_index,
+                              a_values, b_values,
+                              k, theta)
         cov[i, j] = hy
         cov[j, i] = hy
     return cov
 
 
 @numba.njit(cache=False, parallel=False, fastmath=False)
-def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
+def _hayashi_yoshida(a_index, b_index, a_values, b_values, k=None, theta=None):
     """
     The inner function of :func:`~hayashi_yoshida` is accelerated
     via JIT compilation with Numba.
@@ -1534,8 +1950,8 @@ def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
 
     b_values : numpy.ndarray, 1d
         A numpy.ndarray containing log-returns. Similar to a_values.
-    step : int, default=1
-        The step is 1 for the standard HY estimator. When preaveraging
+    k : int, default=None
+        k is 1 for the standard HY estimator. When preaveraging
         is used to cancel microstructure noise, the step size has to be
         adjusted according to Eqn (27) of Christensen et al. (2010).
 
@@ -1548,11 +1964,39 @@ def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
     assert len(a_index) == len(a_values) and len(b_index) == len(b_values), \
         'indeces and values must have same length.'
 
+    if k is not None and theta is not None:
+        raise ValueError("Either ``theta`` or ``k`` can be specified,"
+                         " but not both! One of them must be ``None``.")
+
+    if theta is None:
+        if k is None:
+            # if no preaveraging
+            k = 1
+    else:
+        # If ``theta`` is specified set k as recommended in
+        # Christensen et al. (2010)
+        k = _get_k((a_values.shape[0] + b_values.shape[0])/2, theta, True)
+
+    if k > 1:
+        # Preaverage
+        weight = _numba_minimum(np.arange(1, k)/k)
+        a_values = _preaverage(a_values.reshape(-1, 1), weight).flatten()
+        # and adjust acc. to Eqn (27) of Christensen et al. (2010).
+        # psi_HY = np.sum(g(np.arange(1, k)/k))/k = 1/4 for weight
+        # function chosen as def g(x): return np.minimum(x, 1-x)
+        a_values = a_values[k-1:] / (k / 4)
+        b_values = _preaverage(b_values.reshape(-1, 1), weight).flatten()
+        b_values = b_values[k-1:] / (k / 4)
+        a_index = a_index[k-1:]
+        b_index = b_index[k-1:]
+
+    # de-mean
     a_values -= np.mean(a_values)
     b_values -= np.mean(b_values)
+
     temp = np.zeros(a_index.shape[0], dtype=np.float64)
-    for i in prange(step, a_index.shape[0]):
-        start = a_index[i-step]
+    for i in prange(k, a_index.shape[0]):
+        start = a_index[i-k]
         end = a_index[i]
         start_b = np.searchsorted(b_index, start, 'right')
         # TODO limit search space e.g. end only after start. Currently
@@ -1560,92 +2004,28 @@ def _hayashi_yoshida(a_index, b_index, a_values, b_values, step=1):
         # end_b = np.searchsorted(b_index[start_b:], end, 'left') + start_b
         end_b = np.searchsorted(b_index, end, 'left')
         # Don't do:
-        # hy += np.sum(a_values[i] * b_values[start_b: end_b+step])
+        # hy += np.sum(a_values[i] * b_values[start_b: end_b+k])
         # since there are problems in parallelization.
-        temp[i] = np.sum(a_values[i] * b_values[start_b: end_b+step])
+        temp[i] = np.sum(a_values[i] * b_values[start_b: end_b+k])
     hy = np.sum(temp)
     return hy
 
 
-def epic(tick_series_list,  K=None, theta_mrc=0.4, theta_hy=0.15,
-         bias_correction=True, var_weights=None, cov_weights=None):
-    r"""
-    The ensembled pairwise integrated covariance (EPIC) estimator of Woeltjen
-    (2020). The :func:`msrc` estimator , the :func:`mrc` estimator and the
-    preaveraged :func:`hayashi_yoshida` estimator are ensembled to
-    compute an improved finite sample estimate of the pairwise integrated
-    covariance matrix. The EPIC estimator uses every available tick, and
-    compares favorable in finite samples to the HY, MSRC, and MRC on their own.
-    The preaveraged HY estimates of the off-diagonals have better finite sample
-    properties so it might be preferable to overweight them by setting the
-    corresponding ``cov_weights`` element to a number >1/3.
-
-    Parameters
-    ----------
-    tick_series_list : list of pd.Series
-        Each pd.Series contains ticks of one asset with datetime index.
-    K : numpy.ndarray
-        An array of sclales, default= ``None``.
-        If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
-        chosen as :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
-    theta_mrc : float, optional, default=0.4
-        Theta is used to determine the preaveraging window ``k`` according to
-        :math:`k = \theta \sqrt{n}`.
-        Hautsch & Podolskij (2013) recommend 0.4 for liquid assets
-        and 0.6 for less liquid assets. If ``theta=0``, the mrc estimator
-        of the ensemble reduces to the standard realized covariance estimator.
-    theta_hy : float, theta>=0, default=0.15
-        If theta>0, the log-returns for HY are preaveraged with theta and
-        :math:`g(x) = min(x, 1-x)`. Christensen et al. (2013) use
-        ``theta=0.15``.
-        If theta = 0, this is the standard HY estimator.
-    bias_correction : boolean, optional
-        If ``True`` (default) then the estimator is optimized for convergence
-        rate but it might not be p.s.d. Alternatively as described in
-        Christensen et al. (2010) it can be ommited. Then k should be chosen
-        larger than otherwise optimal.
-    var_weights :  numpy.ndarray
-        The weights with which the  diagonal elements of the MSRC, MRC, and
-        the preaveraged HY covariance estimates are weighted, respectively.
-        The weights must sum to one.
-    cov_weights : numpy.ndarray
-        The weights with which the off-diagonal elements of the MSRC, MRC, and
-        the preaveraged HY covariance estimates are weighted, respectively. The
-        HY estimator uses the data more efficiently and thus may deserve a
-        higher weight. The weights must sum to one.
-
-    Returns
-    -------
-    cov : numpy.ndarray
-        The EPIC estimate of the integrated covariance matrix.
-    """
-    if var_weights is None:
-        var_weights = np.ones(3)/3
-    else:
-        assert np.sum(var_weights) == 1, "``var_weights`` must sum to one."
-
-    if cov_weights is None:
-        cov_weights = np.ones(3)/3
-    else:
-        assert np.sum(cov_weights) == 1, "``cov_weights`` must sum to one."
-
-    cov_msrc = msrc(tick_series_list, K=K)
-    cov_mrc = mrc(tick_series_list,
-                  theta=theta_mrc,
-                  bias_correction=bias_correction)
-    cov_hy = hayashi_yoshida(tick_series_list, theta=theta_hy)
-
-    estimates = [cov_msrc, cov_mrc, cov_hy]
-    cov = _ensemble(estimates, var_weights, cov_weights)
-
-    return cov
-
-
-def _ensemble(estimates,  var_weights, cov_weights):
+def ensemble(estimates,  var_weights, cov_weights):
     """
     Ensemble multiple covariance matrix estimates with weights given
     by ``var_weights`` and ``cov_weights`` for the diagonal and
-    off-diagonal elements, respectively.
+    off-diagonal elements, respectively. This function is used in the
+    ensembled pairwise integrated covariance (EPIC) estimator of Woeltjen
+    (2020). The :func:`msrc` estimator , the :func:`mrc` estimator, the
+    :func:`krvm` estimator and the preaveraged :func:`hayashi_yoshida`
+    estimator are ensembled to compute an improved finite sample estimate
+    of the pairwise integrated covariance matrix. The EPIC estimator uses every
+    available tick, and compares favorable in finite samples to its
+    constituents on their own. The preaveraged HY estimates of the off-diagonals
+    have better finite sample properties than the other estimators so it might
+    be preferable to overweight them by setting the corresponding
+    ``cov_weights`` element to a number >1/4.
 
     Parameters
     ----------
