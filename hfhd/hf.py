@@ -21,34 +21,6 @@ from numba import prange
 import warnings
 
 
-def get_cumu_demeaned_resid(price, y_hat=None):
-    r"""
-    From a pd.Series of tick prices and predictions get a pd.Series of
-    tick log-prices with zero-mean returns, i.e. the reconstructed
-    log-prices from de-meaned log-return residuals. These log-prices are inputs
-    to the integrated covariance matrix estimators.
-
-    Parameters
-    ----------
-    series : pd.Series
-        Tick prices of one asset with datetime index.
-    y_hat : pd.Series
-        The predictions.
-
-    Returns
-    -------
-    out : pd.Series
-        Log-prices corresponding to zero-mean returns.
-    """
-    y = np.log(price.dropna()).diff()
-    resid = y - y.mean()
-
-    if y_hat is not None:
-        resid -= y_hat - y_hat.mean()
-
-    return resid.cumsum()
-
-
 def refresh_time(tick_series_list):
     r"""
     The all-refresh time scheme of Barndorff-Nielsen et al. (2011).
@@ -437,6 +409,34 @@ def _get_indeces_and_values(tick_series_list):
         indeces[i, :idx.shape[0]] = idx[:]
         values[i, :idx.shape[0]] = v[:]
     return indeces, values
+
+
+def get_cumu_demeaned_resid(price, y_hat=None):
+    r"""
+    From a pd.Series of tick prices and predictions get a pd.Series of
+    tick log-prices with zero-mean returns, i.e. the reconstructed
+    log-prices from de-meaned log-return residuals. These log-prices are inputs
+    to the integrated covariance matrix estimators.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Tick prices of one asset with datetime index.
+    y_hat : pd.Series
+        The predictions.
+
+    Returns
+    -------
+    out : pd.Series
+        Log-prices corresponding to zero-mean returns.
+    """
+    y = np.log(price.dropna()).diff()
+    resid = y - y.mean()
+
+    if y_hat is not None:
+        resid -= y_hat - y_hat.mean()
+
+    return resid.cumsum()
 
 
 def msrc(tick_series_list, M=None, N=None, pairwise=True):
@@ -1330,9 +1330,9 @@ def _get_k(n, theta, bias_correction):
 
 @numba.njit
 def parzen_kernel(x):
-    """
-    The Parzen weighting function used in the Kernel Realized Volatility
-    Matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et. al (2011).
+    r"""
+    The Parzen weighting function used in the kernel realized volatility
+    matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et. al (2011).
 
     Parameters
     ----------
@@ -1364,8 +1364,8 @@ def parzen_kernel(x):
 @numba.njit
 def quadratic_spectral_kernel(x):
     """
-    The Quadratic Spectral weighting function used in the Kernel Realized
-    Volatility Matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et.
+    The Quadratic Spectral weighting function used in the kernel realized
+    volatility matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et.
     al (2011).
 
     Parameters
@@ -1468,7 +1468,7 @@ def gamma(data, h):
     \boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}\right)=
     \boldsymbol{\gamma}^{(-h)}\left(\mathbf{Y}\right)^{\prime}, \quad h < 0,
     \end{equation}
-    where $\mathbf{Y}$ denotes the synchronized zero-mean log-price.
+    where $\mathbf{Y}$ denotes the synchronized zero-return log-price.
     """
     if h == 0:
         gamma_h = data @ data.T
@@ -1481,24 +1481,113 @@ def gamma(data, h):
     return gamma_h
 
 
-@numba.njit(cache=False, parallel=False, fastmath=False)
-def _krvm(data, H, kernel):
-    """
+def krvm(tick_series_list, H, pairwise=True, kernel=quadratic_spectral_kernel):
+    r"""
+    The kernel realized volatility matrix estimator (KRVM) of Barndorff-Nielsen
+    et. al (2011).
+
     Parameters
     ----------
-    data : numpy.ndarray, shape = (p, n)
-        An array of (jittered), synchronized and log_returns.
-        (e.g. with :func:`~refresh_time`).
+    tick_series_list : list of pd.Series
+        Each pd.Series contains tick-log-prices of one asset
+        with datetime index.
     H : int, > 0
         The bandwidth parameter for the Parzen kernel.
         Should be on the order of $n^{3/5}$.
-    kernel : function
+    pairwise : bool, default=True
+        If ``True`` the estimator is applied to each pair individually. This
+        increases the data efficiency but may result in an estimate that is
+        not p.s.d even for the p.s.d version of thiss estimator.
+    kernel : function, default=quadratic_spectral_kernel
         The kernel weighting function.
 
     Returns
     -------
-    cov : numpy.ndarray, 2d
-        The integrated covariance matrix estimate.
+    cov : numpy.ndarray
+        The intgrated covariance matrix estimate.
+
+    Notes
+    -----
+    The multivariate realized kernel estimator smoothes the autocovariance
+    operator and thereby achieves the optimal convergence rate in the
+    multivariate setting with noise and asynchronous observation times.
+    Incidentally, this estimator is similar in form to the HAC, widely used in
+    the statistics and econometrics literature to deal with heteroscedastic and
+    autocorrelated noise. Observations are synchronized with the
+    :func:`refresh-time` scheme. In addition, $m$ observation are averaged at
+    the beginning and at the end of the trading day to estimate the efficient
+    price at these times. The authors call this 'jittering'. In practice the
+    effect of jittering is negligible but it is needed for proving consistency.
+    (It is ignored in this implementation.)
+    The, with parameter $m$, jittered log-price vectors are denoted as
+    $\mathbf{Y}^{(m)}(s), s=1, \ldots, n-2 m+1$.
+    The kernel estimator is defined by
+    \begin{equation}
+    \widehat{\mathbf{\Sigma}}^{(KRVM)}=\boldsymbol{\gamma}^{(0)}
+    \left(\mathbf{Y}^{(m)}\right)+\sum_{h=1}^{n-2 m} k\left(\frac{h-1}{H}
+    \right)\left[\boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}^{(m)}\right)+
+    \boldsymbol{\gamma}^{(-h)}\left(\mathbf{Y}^{(m)}\right)\right],
+    \end{equation}
+    where
+    \begin{equation}
+    \boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}\right)=
+    \sum_{s=h+2}^{n+1}\left(\mathbf{Y}(s)-\mathbf{Y}(s-1)\right)
+    \left(\mathbf{Y}(s-h)-\mathbf{Y}(s-h-1)\right)^{\prime}, \quad h \geq 0
+    \end{equation}
+    and
+    \begin{equation}
+    \boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}\right)=
+    \boldsymbol{\gamma}^{(-h)}\left(\mathbf{Y}\right)^{\prime}, \quad h < 0,
+    \end{equation}
+    with $\mathbf{Y}$ denoting the synchronized zero-return log-price.
+    $\boldsymbol{\gamma}^{(h)}$ is the $h$th realized autocovariance (:func:`gamma`).
+    $k(\cdot)$ is the kernel function with its bandwidth parameter $H$. It is
+    assumed that
+    (i) $k(0)=1$ and $k^{\prime}(0)=0$,
+    (ii) $k(\cdot)$ is twice differentiable with continuous
+    derivatives, and
+    (iii) $\int_{0}^{\infty} k(x)^{2} d x,
+    \int_{0}^{\infty} k^{\prime}(x)^{2} d x$ and $\int_{0}^{\infty}
+    k^{\prime \prime}(x)^{2} d x$ are finite. A slightly adjusted form of this
+    estimator that is positive semidefinite is given by
+    \begin{equation}
+    \widehat{\mathbf{\Sigma}}^{(KRVM_{psd})}=\boldsymbol{\gamma}^{(0)}
+    \left(\mathbf{Y}^{(m)}\right)+\sum_{h=1}^{n-2 m} k\left(\frac{h}{H}\right)
+    \left[\boldsymbol{\gamma}^{(h)}\left(\mathbf{Y}^{(m)}\right)+
+    \boldsymbol{\gamma}^{(-h)}\left(\mathbf{Y}^{(m)}\right)\right].
+    \end{equation}
+    This form requires the additional assumption $\int_{-\infty}^{\infty}
+    k(x) \exp (i x \lambda) d x \geq 0$ for all $\lambda \in \mathbb{R}$.
+
+    Choosing the right kernel function is important. The authors show, for
+    example, that the estimator based on the Bartlett weight function is
+    inconsistent. Instead, the Parzen kernel (:func:`parzen_kernel`) is
+    suggested as a weight function that yields a consistent estimator and can
+    be efficiently implemented. The bandwidth $H$ must be on the order of
+    $n^{3 / 5}$. The authors choose the scalar $H$ as the average of optimal
+    individual $H^{(j)}$:
+    $$\bar{H}=p^{-1} \sum_{j=1}^{p} H^{(j)},$$
+    where
+    \begin{equation}
+    H^{(j)}=c^{*} \xi_{j}^{4 / 5} n^{3 / 5},
+    \end{equation}
+    with
+    \begin{equation}
+    c^{*}=\left\{k^{\prime \prime}(0)^{2} / k_{\bullet}^{0,0}\right\}^{1 / 5},
+    \end{equation}
+    and
+    \begin{equation}
+    \xi_{j}^{2}={\Sigma}_{\epsilon, j j} / {\Sigma}_{j j}.
+    \end{equation}
+    $\mathbf{\Sigma}_{\epsilon}$  and $\mathbf{\Sigma}$ denote, as previously
+    defined, the integrated covariance matrix of the noise and the efficient
+    return process, respectively. Here these quantities are understood over the
+    interval under consideration. Hence, $\xi_{j}^{2}$ can be interpreted as
+    the ratio of the noise variance and the return variance.
+    For the Parzen kernel $c^{*}  = 3.51$, as tabulated by the authors. It is a
+    measure of the relative asymptotic efficiency of the kernel.
+    ${\Sigma}_{j j}$ may be estimated via a low frequency estimator and
+    ${\Sigma}_{\epsilon,j j}$ via a high frequency estimator.
 
     References
     ----------
@@ -1507,27 +1596,20 @@ def _krvm(data, H, kernel):
     of the covariation of equity prices with noise and non-synchronous trading,
     Journal of Econometrics 162(2): 149– 169."""
 
-    p, n = data.shape
+    p = len(tick_series_list)
 
-    # de-mean
-    # numba doesn't support kwargs for np.mean
-    for i in range(p):
-        data[i, :] -= np.mean(data[i, :])
+    if pairwise and p > 1:
+        indeces, values = _get_indeces_and_values(tick_series_list)
+        cov = _krvm_pairwise(indeces, values, H, kernel)
+    else:
+        if p > 1:
+            data = refresh_time(tick_series_list).dropna()
+            data = np.diff(data.to_numpy(), axis=0)
+        else:
+            data = tick_series_list[0]
+            data = np.diff(data.to_numpy(), axis=0)[:, None]
 
-    # if p.s.d estimator: c=0, else: c=1, since pairwise estimation and
-    # subsequent shrinkage is advocated anyway, hard-code to 1.
-    c = 1
-    cov = gamma(data, 0)
-    for h in range(1, n+1):
-        weight = kernel((h-c) / H)
-
-        # The Parzen kernel, for example, needs to compute only
-        # H gammas after that the weight stays 0, hence early stop.
-        if weight == 0:
-            return cov
-
-        g = gamma(data, h)
-        cov += weight * (g + g.T)
+        cov = _krvm(data.T, H, kernel)
 
     return cov
 
@@ -1597,27 +1679,24 @@ def _krvm_pairwise(indeces, values, H, kernel):
     return cov
 
 
-def krvm(tick_series_list, H, pairwise=True, kernel=quadratic_spectral_kernel):
+@numba.njit(cache=False, parallel=False, fastmath=False)
+def _krvm(data, H, kernel):
     """
     Parameters
     ----------
-    tick_series_list : list of pd.Series
-        Each pd.Series contains tick-log-prices of one asset
-        with datetime index.
+    data : numpy.ndarray, shape = (p, n)
+        An array of (jittered), synchronized and log_returns.
+        (e.g. with :func:`~refresh_time`).
     H : int, > 0
         The bandwidth parameter for the Parzen kernel.
         Should be on the order of $n^{3/5}$.
-    pairwise : bool, default=True
-        If ``True`` the estimator is applied to each pair individually. This
-        increases the data efficiency but may result in an estimate that is
-        not p.s.d even for the p.s.d version of thiss estimator.
-    kernel : function, default=quadratic_spectral_kernel
+    kernel : function
         The kernel weighting function.
 
     Returns
     -------
-    cov : numpy.ndarray
-        The intgrated covariance matrix estimate.
+    cov : numpy.ndarray, 2d
+        The integrated covariance matrix estimate.
 
     References
     ----------
@@ -1626,20 +1705,27 @@ def krvm(tick_series_list, H, pairwise=True, kernel=quadratic_spectral_kernel):
     of the covariation of equity prices with noise and non-synchronous trading,
     Journal of Econometrics 162(2): 149– 169."""
 
-    p = len(tick_series_list)
+    p, n = data.shape
 
-    if pairwise and p > 1:
-        indeces, values = _get_indeces_and_values(tick_series_list)
-        cov = _krvm_pairwise(indeces, values, H, kernel)
-    else:
-        if p > 1:
-            data = refresh_time(tick_series_list).dropna()
-            data = np.diff(data.to_numpy(), axis=0)
-        else:
-            data = tick_series_list[0]
-            data = np.diff(data.to_numpy(), axis=0)[:, None]
+    # de-mean
+    # numba doesn't support kwargs for np.mean
+    for i in range(p):
+        data[i, :] -= np.mean(data[i, :])
 
-        cov = _krvm(data.T, H, kernel)
+    # if p.s.d estimator: c=0, else: c=1, since pairwise estimation and
+    # subsequent shrinkage is advocated anyway, hard-code to 1.
+    c = 1
+    cov = gamma(data, 0)
+    for h in range(1, n+1):
+        weight = kernel((h-c) / H)
+
+        # The Parzen kernel, for example, needs to compute only
+        # H gammas after that the weight stays 0, hence early stop.
+        if weight == 0:
+            return cov
+
+        g = gamma(data, h)
+        cov += weight * (g + g.T)
 
     return cov
 
