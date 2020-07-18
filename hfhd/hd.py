@@ -233,6 +233,38 @@ def _linear_shrinkage_intensity(X, S):
     return rho_hat
 
 
+def linear_shrink_target(cov, target, step=0.05, max_iter=100):
+    r"""
+    Linearly shrink a covariance matrix until a condition number target is
+    reached. Useful for reducing the impact of outliers in :func:`nerive`.
+
+    Parameters
+    ----------
+    cov : numpy.ndarray, shape = (p, p)
+        The covariance matrix.
+    target: float > 1
+        The highest acceptable condition number.
+    step : float > 0
+        The linear shrinkage parameter for each step.
+    max_iter : int > 1
+        The maximum number of iterations until giving up.
+
+    Returns
+    -------
+    cov : numpy.ndarray, shape = (p, p)
+        The linearly shrunk covariance matrix estimate.
+
+    """
+    assert target > 1: "Target cond must be greater 1."
+
+    for _ in range(max_iter):
+        cond = np.linalg.cond(cov)
+        if cond <= target:
+            break
+        cov = _linear_shrinkage_cov(cov, step)
+    return cov
+
+
 def nonlinear_shrinkage(X):
     r"""
     Compute the shrunk sample covariance matrix with the analytic nonlinear
@@ -696,9 +728,11 @@ def nerive(tick_series_list, stp=None, estimator=None, **kwargs):
     Similar to NERCOME, NERIVE allows for the presence of pervasive factors as
     long as they persist between refresh times.
 
-    .. note::
+    .. warning::
         NERIVE splits the data into smaller subsamples. Estimator
-        parameters that depend on the sample size amust be adjusted.
+        parameters that depend on the sample size must be adjusted.
+        Further, the price process must be preprocessed to have zero mean
+        return over the **full** sample.
 
     References
     ----------

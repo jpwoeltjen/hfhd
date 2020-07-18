@@ -456,7 +456,7 @@ def msrc(tick_series_list, M=None, N=None, pairwise=True):
         If ``M=None`` all scales :math:`i = 1, ..., M` are used, where M is
         chosen :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
     N : int, >=0, default=None
-        The constant $N$ of Tao et. al (2013)
+        The constant $N$ of Tao et al. (2013)
         If ``N=None`` :math:`N = n^{1/2}`. Lam and Qian (2019) need
         :math:`N = n^{2/3}` for non-sparse integrated covariance matrices,
         in which case the rate of convergence reduces to $n^{1/6}$.
@@ -573,86 +573,6 @@ def msrc(tick_series_list, M=None, N=None, pairwise=True):
     return cov
 
 
-# @numba.njit(fastmath=False, parallel=False)
-# def _msrc(data, K=None):
-#     r"""
-#     The inner function of :func:`~msrc`, not pairwise. The multi-scale realized
-#     volatility (MSRV) estimator of Zhang (2006). It is extended to multiple
-#     dimensions following Zhang (2011).
-
-#     Parameters
-#     ----------
-#     data : numpy.ndarray, >0, shape = (p, n)
-#         previous tick prices with dimensions p by n, where
-#         p = #assets, n = #number of refresh times, most recent tick on the
-#         right, must be synchronized (e.g. with :func:`~refresh_time`).
-#     K : numpy.ndarray, >=1
-#         An array of sclales, default= ``None``.
-#         If ``None`` all scales :math:`i = 1, ..., M` are used, where M is
-#         chosen :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
-
-
-#     Returns
-#     -------
-#     out : numpy.ndarray
-#         The mrc estimate of the integrated covariance matrix.
-
-#     Examples
-#     --------
-
-#     >>> np.random.seed(0)
-#     >>> n = 200000
-#     >>> returns = np.random.multivariate_normal([0, 0], [[1,0.5],[0.5,1]], n)/n**0.5
-#     >>> prices = 100*np.exp(returns.cumsum(axis=0))
-#     >>> # add Gaussian microstructure noise
-#     >>> noise = 10*np.random.normal(0, 1, n*2).reshape(-1, 2)*np.sqrt(1/n**0.5)
-#     >>> prices +=noise
-#     >>> # sample n/2 (non-synchronous) observations of each tick series
-#     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
-#     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-#     >>> pt = refresh_time([series_a, series_b])
-#     >>> icov = _msrc(pt.values.T, K=np.array([1]))
-#     >>> icov_c = _msrc(pt.values.T)
-#     >>> # This is the biased uncorrected integrated covariance matrix estimate.
-#     >>> icov
-#     array([[11.55288112,  0.45281646],
-#            [ 0.45281646,  2.17269871]])
-#     >>> # This is the unbiased corrected integrated covariance matrix estimate.
-#     >>> icov_c
-#     array([[0.89731589, 0.48705002],
-#            [0.48705002, 0.9801241 ]])
-#     >>> # In the univariate case we add an axis
-#     >>> univariate_ticks = series_a.values[:, None]
-#     >>> ivar_c = _msrc(univariate_ticks.T)
-#     >>> ivar_c
-#     array([[0.90361064]])
-#     """
-
-#     p, n = data.shape
-#     if K is None:
-#         # Opt M according to Eqn (34) of Zhang (2006)
-# #         M = int(np.ceil(0.5*n**(1/2)))
-#         M = int(np.ceil(1*n**(1/2)))
-#         K = np.arange(1, M+1)
-
-#     K_mean = np.mean(K)
-#     K_var = np.var(K)
-#     n_K = len(K)
-#     denom = n_K*K_var
-
-#     s = np.zeros((p, p))
-#     for k in K:
-#         sk = (data[:, k:] - data[:, :-k])
-#         sk = sk @ sk.T
-#         # optimal weights according to Eqn (18)
-#         if n_K > 1:
-#             a = (k-K_mean)/denom
-#         # if no bias correction
-#         else:
-#             a = 1.
-#         s += a * sk
-#     return s
-
 @numba.njit(fastmath=False, parallel=False)
 def _get_YY_m(Y, N, m):
     Km = N + m
@@ -684,7 +604,7 @@ def _msrc(data, M, N):
         If ``M=None`` all scales :math:`i = 1, ..., M` are used, where M is
         chosen :math:`M = n^{1/2}` acccording to Eqn (34) of Zhang (2006).
     N : int, >=0
-        The constant $N$ of Tao et. al (2013)
+        The constant $N$ of Tao et al. (2013)
         If ``N=None`` :math:`N = n^{1/2}`. Lam and Qian (2019) need
         :math:`N = n^{2/3}` for non-sparse integrated covariance matrices,
         in which case the rate of convergence reduces to $n^{1/6}$.
@@ -1332,7 +1252,7 @@ def _get_k(n, theta, bias_correction):
 def parzen_kernel(x):
     r"""
     The Parzen weighting function used in the kernel realized volatility
-    matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et. al (2011).
+    matrix estimator (:func:`~krvm`) of Barndorff-Nielsen et al. (2011).
 
     Parameters
     ----------
@@ -1396,7 +1316,7 @@ def quadratic_spectral_kernel(x):
 def get_bandwidth(n, var_ret, var_noise, kernel):
     """
     Compute the optimal bandwidth parameter $H$ for :func:`~krvm` according to
-    Barndorff-Nielsen et. al (2011).
+    Barndorff-Nielsen et al. (2011).
 
     Parameters
     ----------
@@ -1422,12 +1342,12 @@ def get_bandwidth(n, var_ret, var_noise, kernel):
 
     if kernel == 'parzen':
         # Parzen kernel c_star according to Table 1 of
-        # Barndorff-Nielsen et. al (2011).
+        # Barndorff-Nielsen et al. (2011).
         c_star = 3.51
 
     elif kernel == 'quadratic_spectral':
         # Quadratic Spectral c_star according to Table 1 of
-        # Barndorff-Nielsen et. al (2011).
+        # Barndorff-Nielsen et al. (2011).
         c_star = 0.46
     else:
         raise ValueError("Specified kernel not implemented.")
@@ -1484,7 +1404,7 @@ def gamma(data, h):
 def krvm(tick_series_list, H, pairwise=True, kernel=quadratic_spectral_kernel):
     r"""
     The kernel realized volatility matrix estimator (KRVM) of Barndorff-Nielsen
-    et. al (2011).
+    et al. (2011).
 
     Parameters
     ----------
