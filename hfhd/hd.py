@@ -255,7 +255,7 @@ def linear_shrink_target(cov, target, step=0.05, max_iter=100):
         The linearly shrunk covariance matrix estimate.
 
     """
-    assert target > 1: "Target cond must be greater 1."
+    assert target > 1, "Target cond must be greater 1."
 
     for _ in range(max_iter):
         cond = np.linalg.cond(cov)
