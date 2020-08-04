@@ -482,7 +482,7 @@ def msrc(tick_series_list, M=None, N=None, pairwise=True):
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-    >>> # subtract mean return
+    >>> # get log prices
     >>> series_a = np.log(series_a)
     >>> series_b = np.log(series_b)
     >>> icov = msrc([series_a, series_b], M=1, pairwise=False)
@@ -493,8 +493,8 @@ def msrc(tick_series_list, M=None, N=None, pairwise=True):
            [ 0.453,  2.173]])
     >>> # This is the unbiased,  corrected integrated covariance matrix estimate.
     >>> np.round(icov_c, 3)
-    array([[0.974, 0.408],
-           [0.408, 1.094]])
+    array([[0.985, 0.392],
+           [0.392, 1.112]])
 
     Notes
     -----
@@ -577,11 +577,6 @@ def msrc(tick_series_list, M=None, N=None, pairwise=True):
 def _get_YY_m(Y, N, m):
     Km = N + m
     log_rets = Y[:, Km:] - Y[:, :-Km]
-
-    # de-mean
-    # numba doesn't support kwargs for np.mean
-    for i in range(log_rets.shape[0]):
-        log_rets[i, :] -= np.mean(log_rets[i, :])
 
     return log_rets @ log_rets.T / Km
 
@@ -769,7 +764,7 @@ def tsrc(tick_series_list, J=1, K=None):
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-    >>> # take logs and subtract mean return
+    >>> # take logs
     >>> series_a = np.log(series_a)
     >>> series_b = np.log(series_b)
     >>> icov_c = tsrc([series_a, series_b])
@@ -840,7 +835,6 @@ def tsrc(tick_series_list, J=1, K=None):
 
     """
     data = refresh_time(tick_series_list)
-    data -= data.mean(axis=0)
     M = data.shape[0]
 
     if K is None:
@@ -933,23 +927,23 @@ def mrc(tick_series_list, theta=None, g=None, bias_correction=True,
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-    >>> # take logs and subtract mean return
+    >>> # take logs
     >>> series_a = np.log(series_a)
     >>> series_b = np.log(series_b)
     >>> icov_c = mrc([series_a, series_b], pairwise=False)
     >>> # This is the unbiased, corrected integrated covariance matrix estimate.
     >>> np.round(icov_c, 3)
-    array([[0.827, 0.407],
-           [0.407, 0.895]])
+    array([[0.882, 0.453],
+           [0.453, 0.934]])
     >>> # This is the unbiased, corrected realized variance estimate.
     >>> ivar_c = mrc([series_a], pairwise=False)
     >>> np.round(ivar_c, 3)
-    array([[0.85]])
+    array([[0.894]])
     >>> # Use ticks more efficiently by pairwise estimation
     >>> icov_c = mrc([series_a, series_b], pairwise=True)
     >>> np.round(icov_c, 3)
-    array([[0.85 , 0.407],
-           [0.407, 0.884]])
+    array([[0.894, 0.453],
+           [0.453, 0.916]])
 
     Notes
     -----
@@ -1103,11 +1097,6 @@ def _mrc(data, theta, g, bias_correction, k):
     """
 
     n, p = data.shape
-
-    # de-mean
-    # numba doesn't support kwargs for np.mean
-    for i in range(p):
-        data[:, i] -= np.mean(data[:, i])
 
     # get the bandwidth
     if k is not None and theta is not None:
@@ -1627,11 +1616,6 @@ def _krvm(data, H, kernel):
 
     p, n = data.shape
 
-    # de-mean
-    # numba doesn't support kwargs for np.mean
-    for i in range(p):
-        data[i, :] -= np.mean(data[i, :])
-
     # if p.s.d estimator: c=0, else: c=1, since pairwise estimation and
     # subsequent shrinkage is advocated anyway, hard-code to 1.
     c = 1
@@ -1840,7 +1824,7 @@ def hayashi_yoshida(tick_series_list, theta=None, k=None):
     >>> # sample n/2 (non-synchronous) observations of each tick series
     >>> series_a = pd.Series(prices[:, 0]).sample(int(n/2)).sort_index()
     >>> series_b = pd.Series(prices[:, 1]).sample(int(n/2)).sort_index()
-    >>> # take logs and subtract mean return
+    >>> # take logs
     >>> series_a = np.log(series_a)
     >>> series_b = np.log(series_b)
     >>> icov = hayashi_yoshida([series_a, series_b])
@@ -1995,10 +1979,6 @@ def _hayashi_yoshida(a_index, b_index, a_values, b_values, k=None, theta=None):
         b_values = b_values[k-1:] / (k / 4)
         a_index = a_index[k-1:]
         b_index = b_index[k-1:]
-
-    # de-mean
-    a_values -= np.mean(a_values)
-    b_values -= np.mean(b_values)
 
     temp = np.zeros(a_index.shape[0], dtype=np.float64)
     for i in prange(k, a_index.shape[0]):
